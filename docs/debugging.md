@@ -7,6 +7,7 @@ The card carries its own instruments, so a problem in the memory system can be s
 | Is the DDR3 calibrated? Did DMA reach the memory system? Did it return errors? | `npu-ctl info` (BAR0 registers) | The i.MX95 |
 | Is the DDR3 calibrated, with no host at all? Reset the memory controller. | `make ddr-status`, `make ddr-reset` (VIO) | The JTAG cable |
 | Does the DDR3 work, with PCIe out of the picture? | `make jtag-memtest` (JTAG-to-AXI master) | The JTAG cable |
+| How fast is the DDR3, and is all of it intact, seen from inside the card? | `npu-ctl bwtest` (`mem_bw` engine, every beat checked) | The i.MX95 |
 | What exactly happened on the AXI bus? Was the AXI protocol broken? | System ILAs in the Hardware Manager | The JTAG cable, Vivado GUI |
 
 ## What is in the FPGA
@@ -19,6 +20,7 @@ The card carries its own instruments, so a problem in the memory system can be s
 | System ILA on the MIG side (`system_ila_1`) | `card_mem`, on the MIG's AXI port | MIG `ui_clk`, 100 MHz | 1024 samples of the 512-bit AXI traffic into the MIG, with a protocol checker |
 | VIO | `card_mem` | Debug clock, 78.125 MHz | Inputs: calibration done, MMCM locked. Output: MIG reset request |
 | JTAG-to-AXI master | `card_mem`, second master on the SmartConnect | MIG `ui_clk` | Reads and writes DDR3 from Vivado Tcl |
+| `mem_bw` | `hw/rtl/mem_bw.v`, third master on the SmartConnect | MIG `ui_clk` | 512-bit burst traffic with data check; bandwidth from the card's cycle counter (`BW_*` registers) |
 
 The debug hub, the VIO and the ILAs' JTAG side run from the AC701's Si570 user clock (156.25 MHz at power-up, divided to 78.125 MHz in `npu_top`). That clock does not depend on the PCIe host or on the MIG, so Vivado can still reach the debug cores when the link is down or the memory controller is held in reset. The ILA on the PCIe side samples only while the host supplies the PCIe reference clock; the Hardware Manager reports its clock as not running otherwise.
 

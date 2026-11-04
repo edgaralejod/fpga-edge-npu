@@ -1,0 +1,33 @@
+xdma: unmap card-to-host buffers with the entry count given to dma_map_sg()
+
+transfer_destroy() unmapped with sgt->nents, the count dma_map_sg() returned.
+With an IOMMU the mapped entries can be merged, so the unmap synced only the
+first page's CPU cache lines and later pages read back stale on non-coherent
+hosts (found on the FRDM-i.MX95, NXP BSP 6.18, IOMMU translating).
+
+Upstream: Xilinx/dma_ip_drivers issue #386 (reported 2026-05-15 by
+VennittiAndrea, with the same fix) is still open; applies to commit a918c51.
+
+diff --git i/XDMA/linux-kernel/xdma/libxdma.c w/XDMA/linux-kernel/xdma/libxdma.c
+index e6f1be6..52fb3be 100644
+--- i/XDMA/linux-kernel/xdma/libxdma.c
++++ w/XDMA/linux-kernel/xdma/libxdma.c
+@@ -2910,11 +2910,16 @@ static void transfer_destroy(struct xdma_dev *xdev, struct xdma_transfer *xfer)
+ 		struct sg_table *sgt = xfer->sgt;
+ 
+ 		if (sgt->nents) {
++			/* dma_unmap_sg() takes the nents given to dma_map_sg(),
++			 * not the count it returned: with an IOMMU the mapped
++			 * entries can be merged, and unmapping only those skips
++			 * the CPU cache sync for the rest of the buffer.
++			 */
+ #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
+-			pci_unmap_sg(xdev->pdev, sgt->sgl, sgt->nents,
++			pci_unmap_sg(xdev->pdev, sgt->sgl, sgt->orig_nents,
+ 				     xfer->dir);
+ #else
+-			dma_unmap_sg(&xdev->pdev->dev, sgt->sgl, sgt->nents,
++			dma_unmap_sg(&xdev->pdev->dev, sgt->sgl, sgt->orig_nents,
+ 				     xfer->dir);
+ #endif
+ 			sgt->nents = 0;

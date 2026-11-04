@@ -61,6 +61,7 @@ K="make -C linux-imx O=$PWD/kbuild ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- L
 $K olddefconfig && $K kernelrelease      # must print the board's uname -r
 $K -j$(nproc) Image modules              # about 12 minutes; produces Module.symvers
 git clone https://github.com/Xilinx/dma_ip_drivers
+git -C dma_ip_drivers apply <repo>/sw/patches/xdma-unmap-orig-nents.patch   # see "Problems found"
 cd dma_ip_drivers/XDMA/linux-kernel/xdma
 $K M=$PWD ccflags-y=-I$PWD/../include modules
 aarch64-linux-gnu-strip --strip-debug xdma.ko
@@ -68,7 +69,7 @@ aarch64-linux-gnu-strip --strip-debug xdma.ko
 
 The driver's Makefile passes its include path in `EXTRA_CFLAGS`, which Linux 6.18 no longer reads; `ccflags-y` replaces it. Arch Linux's cross compiler is GCC 16.2 and NXP built the kernel with GCC 15.2; the module loads and runs.
 
-On the i.MX95, load it with the script, which first puts the card's IOMMU group in pass-through mode (see "Problems found"):
+On the i.MX95, load it with the script. The i.MX95's IOMMU stays on and translates the card's DMA; with the unpatched driver, add `passthrough` as a second argument (see "Problems found"):
 
 ```sh
 sudo sw/scripts/imx95-load-xdma.sh ./xdma.ko   # creates /dev/xdma0_user, _h2c_0, _c2h_0, _events_*
@@ -76,7 +77,7 @@ sudo ./npu-ctl info                            # now through /dev/xdma0_user
 sudo ./npu-ctl dmatest 65536 100
 ```
 
-The pass-through setting and the driver are lost at every reboot. To have systemd run the script at boot, install `sw/scripts/npu-card.service` (instructions in the file); with the script and `xdma.ko` in `/root`:
+The driver is not loaded at boot by itself. To have systemd run the script at boot, install `sw/scripts/npu-card.service` (instructions in the file); with the script and `xdma.ko` in `/root`:
 
 ```sh
 sudo cp npu-card.service /etc/systemd/system/
@@ -166,6 +167,24 @@ Measured 2026-11-04 (same setup as phase 1, bitstream build `26110417`, IOMMU pa
 
 Large transfers reach about 74 % of the 500 MB/s Gen2 x1 carries per direction. `memtest` itself reports about 200 MB/s, because generating and checking the pattern on the Cortex-A55 takes about half its time.
 
+### Card-side bandwidth
+
+`mem_bw` writes and then reads the whole 1 GiB in 4 KiB, 512-bit bursts at the MIG's 100 MHz clock, checking every 64-byte beat it reads, and times both passes with the card's own cycle counter:
+
+```sh
+sudo ./npu-ctl bwtest                 # all of card memory, 16 bursts in flight
+sudo ./npu-ctl bwtest 1073741824 1    # one burst at a time
+```
+
+Measured 2026-11-04 (card 0.3.0, build `26110418`; DDR3 peak 800 MT/s x 8 bytes = 6400 MB/s):
+
+| Bursts in flight | Write | Read |
+| --- | --- | --- |
+| 1 | 4227 MB/s (66 %) | 3629 MB/s (57 %) |
+| 2, 4, 8, 16 | 5468 MB/s (85 %) | 5921 MB/s (93 %) |
+
+Every run: 0 mismatched beats, 0 AXI errors. One burst at a time pays the controller's read latency on every 4 KiB; two in flight already hide it, and the identical results from 2 to 16 put the remaining limit in the MIG (refresh, page changes, write-to-read turnaround). The card's memory delivers about 16 times what the PCIe Gen2 x1 link carries (370 MB/s), so whatever the compute engine needs repeatedly has to stay in card memory: the case Ara-class accelerators make for on-card DRAM.
+
 ### Phase 2 checklist
 
 | Check | Expected | Result |
@@ -179,13 +198,13 @@ Large transfers reach about 74 % of the 500 MB/s Gen2 x1 carries per direction. 
 | Flash boot, enumeration, link | Gen2 x1, `10ee:7021` | Pass, 2026-11-04 |
 | `npu-ctl dmatest` up to 16 MiB, and at the top of the DDR3 | PASS | Pass, 2026-11-04, 0 AXI error responses |
 | `npu-ctl memtest` over 1 GiB | PASS | Pass, 2026-11-04, twice (4 MiB and 1 MiB chunks, different seeds) |
-| Card-side DDR3 bandwidth (counter-based, from inside the FPGA) | Measured | Not run: needs the card-side traffic engine |
+| Card-side DDR3 bandwidth (counter-based, from inside the FPGA) | Measured | Pass, 2026-11-04: 5468 MB/s write, 5921 MB/s read over 1 GiB, every beat checked (`npu-ctl bwtest`, card 0.3.0, build `26110418`; table below) |
 
 ## Problems found
 
 | Date | Symptom | Cause | Fix |
 | --- | --- | --- | --- |
 | 2026-11-04 | The first BAR0 read after reset returned the right value; every later BAR0 read returned `0xFFFFFFFF`. BAR1 reads and BAR0 writes still worked. Long `npu-ctl` loops stalled the i.MX95. | `npu_regs` 0.1.0 raised RVALID in the same cycle as the read-address handshake. XDMA holds RREADY high between reads, so the block counted the response as delivered while XDMA had dropped it, and XDMA's AXI-Lite master waited forever. | 0.1.1 rebuilds `npu_regs` on AMD's AXI4-Lite template, which raises RVALID one cycle later. The testbench now holds RREADY high between reads and has a protocol monitor; it reports 19 errors against the old behavior. |
-| 2026-11-04 | With the XDMA driver loaded, `dmatest` passed at 4 KiB and failed at every larger size: card-to-host transfers returned stale data (mostly the zeros the buffer was cleared to) in every 4 KiB page after the first. Host-to-card transfers, card memory and single-page transfers at any card offset were all correct. | Card-to-host DMA through the i.MX95's SMMU (IOMMU group type `DMA`). After a transfer, flushing the buffer's CPU cache lines (`DC CIVAC` from user space) made all data correct, so it had reached memory; the CPU was reading stale lines. Disabling relaxed ordering and No Snoop on the card, and the driver's `poll_mode=1`, did not help. With the group in pass-through (`identity`) every test passes. Whether the SMMU path delivers the data after the completion is signalled or the IOMMU DMA layer misses cache maintenance for this non-coherent port is not yet known. | `sw/scripts/imx95-load-xdma.sh` sets the card's IOMMU group to pass-through before loading the driver. `sw/tools/cacheprobe` reproduces the problem: FAIL with the group in `DMA` mode, PASS in pass-through (checked 2026-11-04). |
+| 2026-11-04 | With the XDMA driver loaded, `dmatest` passed at 4 KiB and failed at every larger size: card-to-host transfers returned stale data (mostly the zeros the buffer was cleared to) in every 4 KiB page after the first. Host-to-card transfers, card memory and single-page transfers at any card offset were all correct. | A bug in AMD's XDMA driver (`dma_ip_drivers` `a918c51`), exposed by the i.MX95's IOMMU. `xdma_xfer_submit()` maps the user buffer with `dma_map_sg(..., sgt->orig_nents, ...)` and keeps the returned count in `sgt->nents`; `transfer_destroy()` then unmaps with `dma_unmap_sg(..., sgt->nents, ...)` and zeroes `nents`, so the correct unmap is skipped. The DMA API requires the count given to `dma_map_sg()`, not the one it returned. Without an IOMMU the two counts match; with the IOMMU translating, the kernel merges the buffer's pages into one DMA segment, the unmap covers only the first entry, and on this non-coherent Arm host only the first page's CPU cache lines are invalidated. How it was narrowed down: flushing the buffer's cache lines from user space (`DC CIVAC`, `sw/tools/cacheprobe`) made the data correct, so it was in memory; waiting up to 10 ms without touching the buffer did not, so the data was not arriving late; relaxed ordering, No Snoop and `poll_mode=1` made no difference; IOMMU pass-through hid the bug by preventing the merge. | `sw/patches/xdma-unmap-orig-nents.patch` unmaps with `orig_nents`. The same bug and fix were already reported upstream in [Xilinx/dma_ip_drivers#386](https://github.com/Xilinx/dma_ip_drivers/issues/386) (2026-05-15, still open); this project found it independently and applies the fix locally. With it, and the IOMMU translating, `cacheprobe` passes, `dmatest` passes up to 4 MiB (377 MB/s to the card, 340 MB/s back) and `memtest` passes over 1 GiB (2026-11-04). Until 2026-11-04 the workaround was IOMMU pass-through, still available as `imx95-load-xdma.sh <ko> passthrough` for the unpatched driver. |
 
 Record each hardware result with the date, the i.MX95 BSP version, and the exact command.

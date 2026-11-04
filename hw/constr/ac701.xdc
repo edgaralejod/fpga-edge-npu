@@ -39,6 +39,16 @@ set_false_path -from [get_ports cpu_reset]
 # DDR status into npu_regs crosses from the MIG clock through two flops.
 set_false_path -to [get_cells -hier -filter {NAME =~ *regs/ddr_sync1_reg*}]
 
+# mem_bw crosses between the PCIe user clock and the MIG clock with toggles
+# through two flops; the settings and results it moves are held steady around
+# each toggle (see hw/rtl/mem_bw.v), so they have no timing relationship.
+set_false_path -to [get_cells -hier -filter {NAME =~ *bw/m_start_sync_reg[0]*}]
+set_false_path -to [get_cells -hier -filter {NAME =~ *bw/ctl_done_sync_reg[0]*}]
+set_false_path -from [get_cells -hier -filter {NAME =~ *regs/bw_* || NAME =~ *bw/ctl_start_tgl_reg*}] \
+               -to   [get_cells -hier -filter {NAME =~ *bw/m_*}]
+set_false_path -from [get_cells -hier -filter {NAME =~ *bw/m_cycles_reg* || NAME =~ *bw/m_mismatches_reg* || NAME =~ *bw/m_errors_reg* || NAME =~ *bw/m_done_tgl_reg*}] \
+               -to   [get_cells -hier -filter {NAME =~ *bw/ctl_*}]
+
 # --- Debug ---------------------------------------------------------------------
 # Si570 user clock, 156.25 MHz at power-up (3.3 V LVDS into bank 14; the bank
 # runs at 3.3 V, so no internal termination). An MMCM in npu_top divides it to

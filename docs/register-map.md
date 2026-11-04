@@ -16,7 +16,7 @@ All registers are 32 bits wide and must be accessed as aligned 32-bit words. Wri
 | Offset | Name | Access | Reset | Description |
 | --- | --- | --- | --- | --- |
 | `0x000` | ID | RO | `0x4E505530` | ASCII `NPU0`. A host tool checks this before trusting anything else. |
-| `0x004` | VERSION | RO | `0x00000200` | `[23:16]` major, `[15:8]` minor, `[7:0]` patch. 0.1.x is phase 1 (0.1.1 fixed back-to-back reads; 0.1.0 answered only the first BAR0 read after reset). 0.2.0 is phase 2: DDR3 card memory. |
+| `0x004` | VERSION | RO | `0x00000300` | `[23:16]` major, `[15:8]` minor, `[7:0]` patch. 0.1.x is phase 1 (0.1.1 fixed back-to-back reads; 0.1.0 answered only the first BAR0 read after reset). 0.2.0 is phase 2: DDR3 card memory. 0.3.0 adds the card-side bandwidth engine (`BW_*`). |
 | `0x008` | BUILD | RO | build ID | Set at build time, by default the build hour as `YYMMDDHH` in hex digits, from the build machine's clock (`0x26110315` = 2026-11-03, hour 15). Pass another value as the second `build.tcl` argument. |
 | `0x00C` | CAPS | RO | `0x04000003` | `[31:16]` card memory in MiB (1024). `[1]` card memory is DDR3. `[0]` DMA path present. Before 0.2.0, `[31:16]` counted KiB. |
 | `0x010` | SCRATCH | RW | `0x00000000` | Free for read/write tests. Honors byte strobes. |
@@ -28,6 +28,14 @@ All registers are 32 bits wide and must be accessed as aligned 32-bit words. Wri
 | `0x030` | DMA_WRITES | RO | `0x00000000` | Write bursts the DMA engine issued to card memory (AXI AW handshakes). Wraps; take differences. |
 | `0x034` | DMA_READS | RO | `0x00000000` | Read bursts the DMA engine issued to card memory (AXI AR handshakes). Wraps. |
 | `0x038` | DMA_ERRORS | RO | `0x00000000` | Responses to the DMA engine other than OKAY: one per write response, one per read beat. Wraps. |
+| `0x040` | BW_CTRL | RW | `0x00000000` | `mem_bw`, the card-side DDR3 bandwidth engine. Write: `[0]` START (one-cycle pulse), `[1]` mode (0 write the pattern, 1 read and check it), `[12:8]` bursts in flight (1 to 16; 0 means 16), `[31:16]` pattern seed. Read: the same fields, with `[0]` = busy. Writes to `BW_CTRL`, `BW_ADDR` and `BW_LEN` are ignored while busy. |
+| `0x044` | BW_ADDR | RW | `0x00000000` | Start address in card memory, bytes. The low 12 bits are ignored (4 KiB bursts). |
+| `0x048` | BW_LEN | RW | `0x00000000` | Length in bytes, a multiple of 4 KiB; up to the 1 GiB of card memory. |
+| `0x04C` | BW_RUNS | RO | `0x00000000` | Completed runs. It increments when a run's results are in `BW_CYCLES`, `BW_MISMATCH` and `BW_ERRORS`. |
+| `0x050` | BW_CYCLES | RO | — | Cycles of the engine's clock from the start of the last run to its last response. Bandwidth = `BW_LEN` / (`BW_CYCLES` / `BW_CLK_KHZ` / 1000). |
+| `0x054` | BW_MISMATCH | RO | — | 64-byte beats of the last read run that differed from the pattern for that address and seed. |
+| `0x058` | BW_ERRORS | RO | — | AXI responses other than OKAY in the last run: one per write burst, one per read beat. |
+| `0x05C` | BW_CLK_KHZ | RO | `100000` | Frequency of the engine's clock, the MIG's 100 MHz `ui_clk`. |
 
 ## LEDs
 

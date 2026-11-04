@@ -4,7 +4,7 @@ An open neural-processing card built on an FPGA. The card plugs into an embedded
 
 The reference pair is an AMD **AC701** (Artix-7 200T) as the card and an NXP **FRDM-i.MX95** as the host, joined through the i.MX95 board's M.2 Key-M slot. The goal is to learn and show, by building one, how a discrete edge-AI accelerator works from the bus up.
 
-**Status: phase 2, card memory.** The card now has 1 GiB of DDR3: on the FRDM-i.MX95 it enumerates at PCIe Gen2 x1, DMA reaches about 370 MB/s host to card and 330 MB/s card to host, and the whole 1 GiB passes a write-then-verify test. Phase 1 (registers, DMA, interrupt) passed on 2026-11-04. Still open in phase 2: measuring the DDR3's bandwidth from inside the FPGA. [Bring-up](docs/bringup.md) has the measurements and the problems found on the way, including an i.MX95 IOMMU issue that needs a workaround; [debugging](docs/debugging.md) covers the ILAs, VIO and JTAG tests built into the card. There is no inference engine yet; the [roadmap](ROADMAP.md) says what comes next and when each step counts as done.
+**Status: phases 1 and 2 done; phase 3 (command queue and own driver) is next.** On the FRDM-i.MX95 the card enumerates at PCIe Gen2 x1, DMA reaches about 370 MB/s host to card and 340 MB/s back, and the whole 1 GiB of card DDR3 passes write-then-verify tests from the host and from inside the FPGA. Inside the card, the DDR3 delivers 5.5 GB/s writing and 5.9 GB/s reading, 85 to 93 % of its peak. [Bring-up](docs/bringup.md) has the measurements and the problems found on the way, including a cache-maintenance bug in AMD's XDMA driver that the i.MX95's IOMMU exposed, found and patched; [debugging](docs/debugging.md) covers the ILAs, VIO and JTAG tests built into the card. There is no inference engine yet; the [roadmap](ROADMAP.md) says what comes next and when each step counts as done.
 
 Created by **Edgar Duarte**. Apache-2.0 licensed.
 
@@ -30,7 +30,7 @@ Created by **Edgar Duarte**. Apache-2.0 licensed.
 - **Control plane (BAR0).** `npu_regs`, an AXI-Lite register block written for this project: identity, version and build ID, a scratch register, a 64-bit cycle counter for latency measurements, software LEDs, a software-raised interrupt to exercise MSI, and the DDR3 status and DMA counters. See the [register map](docs/register-map.md).
 - **Data plane (BAR1).** XDMA's scatter-gather DMA engine moves buffers between host memory and the card's 1 GiB DDR3 SODIMM, through AMD's memory controller (MIG), the place where weights and tensors will later live. Phase 1 used 64 KiB of block RAM.
 - **Debug.** System ILAs with AXI protocol checkers on both sides of the memory interconnect, a VIO, a JTAG-to-AXI master and DMA counters in BAR0; see [debugging](docs/debugging.md).
-- **Host tool.** `npu-ctl` reads and writes registers, tests the scratch register, measures BAR0 read latency, runs a DMA loopback with throughput figures, and tests all of card memory. It cross-compiles for the i.MX95 (aarch64).
+- **Host tool.** `npu-ctl` reads and writes registers, tests the scratch register, measures BAR0 read latency, runs a DMA loopback with throughput figures, tests all of card memory, and measures the DDR3's bandwidth from inside the card. It cross-compiles for the i.MX95 (aarch64).
 
 ![Vivado Hardware Manager showing the MIG-side System ILA: decoded AXI read transactions, 512-bit read data beats with OKAY responses, and a protocol checker count of zero](docs/images/hardware-manager-ila.png)
 
@@ -61,15 +61,16 @@ Then follow [hardware setup](docs/hardware-setup.md) to connect the boards and [
 | `hw/bd/` | `card_mem.tcl`: the DDR3 memory system and debug cores as a block design. |
 | `hw/scripts/` | `ip.tcl` creates the AMD IP cores from settings; `build.tcl` runs synthesis to bitstream; `create_project.tcl` makes a Vivado project for the GUI; `program.tcl` loads and flashes over JTAG; `debug.tcl` checks DDR3 over JTAG; `axil_template.tcl` regenerates the AXI4-Lite template `npu_regs` is based on. |
 | `hw/sim/` | Self-checking XSim testbenches. |
-| `sw/tools/` | `npu-ctl`, the bring-up tool for the host; `cacheprobe`, the check for the i.MX95 IOMMU DMA problem. |
-| `sw/scripts/` | `imx95-load-xdma.sh`: IOMMU pass-through and driver load on the FRDM-i.MX95; `npu-card.service` runs it at boot. |
+| `sw/tools/` | `npu-ctl`, the bring-up tool for the host; `cacheprobe`, a check for stale CPU cache lines after card-to-host DMA. |
+| `sw/scripts/` | `imx95-load-xdma.sh` loads the XDMA driver on the FRDM-i.MX95; `npu-card.service` runs it at boot. |
+| `sw/patches/` | `xdma-unmap-orig-nents.patch`: fixes AMD's XDMA driver for hosts with an IOMMU (see [bring-up](docs/bringup.md)). |
 | `docs/` | Background, hardware setup, bring-up, debugging, register map. |
 
 The repository holds only source and settings. AMD IP (XDMA, and the MIG, SmartConnect and debug cores in the block design) is generated at build time from `hw/scripts/ip.tcl` and `hw/bd/card_mem.tcl`, never committed.
 
 ## Limits
 
-This is a learning and portfolio project, not a product. It is not certified for any use, and it is not affiliated with AMD, NXP, Hailo or Kinara; their product names describe what this project compares itself with. Performance figures in these docs are labelled as measured, estimated, or from vendor documents. The DMA path currently needs the i.MX95's IOMMU in pass-through mode for the card, which removes the IOMMU's protection against a misbehaving device.
+This is a learning and portfolio project, not a product. It is not certified for any use, and it is not affiliated with AMD, NXP, Hailo or Kinara; their product names describe what this project compares itself with. Performance figures in these docs are labelled as measured, estimated, or from vendor documents.
 
 ---
 

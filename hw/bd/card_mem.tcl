@@ -1,7 +1,7 @@
 # Block design "card_mem": the card's DDR3 memory system and its debug cores.
 #
 #   XDMA AXI4 master (S_AXI_PCIE, 64-bit, 125 MHz) ─┐
-#                                                   ├─ SmartConnect ─ MIG ─ DDR3 SODIMM
+#   mem_bw engine (S_AXI_BW, 512-bit, ui_clk) ──────┼─ SmartConnect ─ MIG ─ DDR3 SODIMM
 #   JTAG-to-AXI master (Vivado Tcl, 32-bit) ────────┘
 #
 # Debug cores, all reached from Vivado's Hardware Manager over the JTAG cable:
@@ -39,6 +39,18 @@ set_property -dict [list CONFIG.ASSOCIATED_BUSIF S_AXI_PCIE CONFIG.ASSOCIATED_RE
 create_bd_port -dir I -type clk -freq_hz 78125000 dbg_clk
 create_bd_port -dir I -type rst ddr_rst
 set_property CONFIG.POLARITY ACTIVE_HIGH [get_bd_ports ddr_rst]
+# Card-side masters in the MIG clock domain (mem_bw in npu_top): their AXI
+# port, the clock and reset they run on.
+set s_axi_bw [create_bd_intf_port -mode Slave -vlnv xilinx.com:interface:aximm_rtl:1.0 S_AXI_BW]
+set_property -dict [list \
+  CONFIG.PROTOCOL AXI4 CONFIG.DATA_WIDTH 512 CONFIG.ADDR_WIDTH 32 CONFIG.ID_WIDTH 0 \
+  CONFIG.HAS_REGION 0 CONFIG.HAS_QOS 0 CONFIG.HAS_CACHE 1 CONFIG.HAS_PROT 1 CONFIG.HAS_LOCK 1 \
+  CONFIG.FREQ_HZ 100000000 \
+] $s_axi_bw
+create_bd_port -dir O -type clk ui_clk
+create_bd_port -dir O -type rst ui_aresetn
+set_property -dict [list CONFIG.ASSOCIATED_BUSIF S_AXI_BW CONFIG.ASSOCIATED_RESET ui_aresetn] [get_bd_ports ui_clk]
+
 create_bd_port -dir O ddr_calib_done
 create_bd_port -dir O ddr_mmcm_locked
 
@@ -63,6 +75,8 @@ connect_bd_net [get_bd_pins mig_0/ui_clk]          [get_bd_pins rst_ui/slowest_s
 connect_bd_net [get_bd_pins mig_0/ui_clk_sync_rst] [get_bd_pins rst_ui/ext_reset_in]
 connect_bd_net [get_bd_pins mig_0/mmcm_locked]     [get_bd_pins rst_ui/dcm_locked]
 connect_bd_net [get_bd_pins rst_ui/peripheral_aresetn] [get_bd_pins mig_0/aresetn]
+connect_bd_net [get_bd_pins mig_0/ui_clk]               [get_bd_ports ui_clk]
+connect_bd_net [get_bd_pins rst_ui/peripheral_aresetn] [get_bd_ports ui_aresetn]
 
 # --- Interconnect: two masters, one memory ----------------------------------------
 set jtag [create_bd_cell -type ip -vlnv [ipdef jtag_axi] jtag_axi]
@@ -71,12 +85,13 @@ connect_bd_net [get_bd_pins mig_0/ui_clk]               [get_bd_pins jtag_axi/ac
 connect_bd_net [get_bd_pins rst_ui/peripheral_aresetn] [get_bd_pins jtag_axi/aresetn]
 
 set sc [create_bd_cell -type ip -vlnv [ipdef smartconnect] sc]
-set_property -dict [list CONFIG.NUM_SI 2 CONFIG.NUM_MI 1 CONFIG.NUM_CLKS 2] $sc
+set_property -dict [list CONFIG.NUM_SI 3 CONFIG.NUM_MI 1 CONFIG.NUM_CLKS 2] $sc
 connect_bd_net [get_bd_pins mig_0/ui_clk]               [get_bd_pins sc/aclk]
 connect_bd_net [get_bd_ports pcie_aclk]                 [get_bd_pins sc/aclk1]
 connect_bd_net [get_bd_pins rst_ui/peripheral_aresetn] [get_bd_pins sc/aresetn]
 connect_bd_intf_net $s_axi                          [get_bd_intf_pins sc/S00_AXI]
 connect_bd_intf_net [get_bd_intf_pins jtag_axi/M_AXI] [get_bd_intf_pins sc/S01_AXI]
+connect_bd_intf_net $s_axi_bw                       [get_bd_intf_pins sc/S02_AXI]
 connect_bd_intf_net [get_bd_intf_pins sc/M00_AXI]     [get_bd_intf_pins mig_0/S_AXI]
 
 # --- System ILAs with AXI protocol checkers ---------------------------------------
@@ -102,11 +117,11 @@ foreach ila [get_bd_cells -filter {VLNV =~ *system_ila*}] {
 
 # --- Address map: DDR3 at 0x0 for both masters -------------------------------------
 # Card address = file offset on /dev/xdma0_h2c_0 and _c2h_0.
-foreach space {/S_AXI_PCIE /jtag_axi/Data} {
+foreach space {/S_AXI_PCIE /jtag_axi/Data /S_AXI_BW} {
   assign_bd_address -offset 0x00000000 -range 1G -force \
     -target_address_space [get_bd_addr_spaces $space] [get_bd_addr_segs mig_0/memmap/memaddr]
 }
-foreach space {/S_AXI_PCIE /jtag_axi/Data} {
+foreach space {/S_AXI_PCIE /jtag_axi/Data /S_AXI_BW} {
   foreach seg [get_bd_addr_segs -of [get_bd_addr_spaces $space]] {
     puts "INFO: card_mem address [get_property PATH $seg]: [get_property OFFSET $seg] + [get_property RANGE $seg]"
   }

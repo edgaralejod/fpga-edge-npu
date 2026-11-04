@@ -3,7 +3,8 @@
 // Covers: identity reads, scratch write/read with byte strobes, AW-before-W
 // and W-before-AW ordering, read-only registers ignoring writes, the coherent
 // 64-bit cycle counter, the interrupt request/ack handshake, and unmapped
-// reads, the DDR status and DMA counter inputs, back-to-back reads with RREADY
+// reads, the DDR status and DMA counter inputs, the mem_bw controls (start
+// pulse, settings held while busy), back-to-back reads with RREADY
 // held high (as XDMA does), and an AXI protocol monitor. Prints "RESULT: PASS" or "RESULT: FAIL".
 
 `timescale 1ns / 1ps
@@ -24,6 +25,14 @@ module tb_npu_regs;
   reg         link_up = 1'b1;
   reg         ddr_calib_done = 1'b0, ddr_mmcm_locked = 1'b1;
   reg  [31:0] dma_writes = 32'h0000_1234, dma_reads = 32'h0000_5678, dma_errors = 32'd0;
+  wire        bw_start, bw_read;
+  wire [4:0]  bw_outstanding;
+  wire [15:0] bw_seed;
+  wire [31:0] bw_addr, bw_len;
+  reg         bw_busy = 1'b0;
+  reg  [31:0] bw_runs = 32'd3, bw_cycles = 32'd1000, bw_mismatches = 32'd0, bw_errors = 32'd0;
+  integer     bw_starts = 0;
+  always @(posedge clk) if (bw_start) bw_starts = bw_starts + 1;
   reg         irq_ack = 1'b0;
   wire [1:0]  user_led;
   wire        irq_req;
@@ -37,12 +46,15 @@ module tb_npu_regs;
     .s_axil_rdata(rdata), .s_axil_rresp(rresp), .s_axil_rvalid(rvalid), .s_axil_rready(rready),
     .link_up(link_up), .ddr_calib_done(ddr_calib_done), .ddr_mmcm_locked(ddr_mmcm_locked),
     .dma_writes(dma_writes), .dma_reads(dma_reads), .dma_errors(dma_errors),
+    .bw_start(bw_start), .bw_read(bw_read), .bw_outstanding(bw_outstanding), .bw_seed(bw_seed),
+    .bw_addr(bw_addr), .bw_len(bw_len), .bw_busy(bw_busy), .bw_runs(bw_runs),
+    .bw_cycles(bw_cycles), .bw_mismatches(bw_mismatches), .bw_errors(bw_errors),
     .user_led(user_led), .irq_req(irq_req), .irq_ack(irq_ack)
   );
 
   integer errors = 0;
 
-  task check(input [255:0] what, input [31:0] got, input [31:0] want);
+  task check(input [511:0] what, input [31:0] got, input [31:0] want);
     begin
       if (got !== want) begin
         $display("FAIL  %0s: got 0x%08h, want 0x%08h", what, got, want);
@@ -136,7 +148,7 @@ module tb_npu_regs;
     repeat (2) @(posedge clk);
 
     axil_read(32'h000, v); check("ID",      v, 32'h4E50_5530);
-    axil_read(32'h004, v); check("VERSION", v, 32'h0000_0200);
+    axil_read(32'h004, v); check("VERSION", v, 32'h0000_0300);
     axil_read(32'h008, v); check("BUILD",   v, 32'h2611_0315);
     axil_read(32'h00C, v); check("CAPS",    v, 32'h0400_0003);
     axil_read(32'h018, v); check("STATUS, DDR not calibrated", v, 32'h0000_0005);
@@ -180,10 +192,30 @@ module tb_npu_regs;
 
     axil_read(32'h7F0, v); check("unmapped read", v, 32'hDEAD_BEEF);
 
+    // mem_bw controls
+    axil_write(32'h044, 32'h0010_0000, 4'hF, 0);
+    axil_write(32'h048, 32'h0040_0000, 4'hF, 0);
+    axil_write(32'h040, 32'hBEEF_1003, 4'hF, 0);     // seed BEEF, 16 in flight, read, START
+    check("BW start pulses", bw_starts, 1);
+    check("BW_CTRL fields out", {bw_seed, 3'd0, bw_outstanding, 6'd0, bw_read, 1'b0}, 32'hBEEF_1002);
+    axil_read(32'h040, v); check("BW_CTRL reads back (START reads as busy)", v, 32'hBEEF_1002);
+    axil_read(32'h044, v); check("BW_ADDR", v, 32'h0010_0000);
+    axil_read(32'h048, v); check("BW_LEN",  v, 32'h0040_0000);
+    bw_busy = 1'b1;
+    axil_write(32'h044, 32'h0000_0000, 4'hF, 0);
+    axil_write(32'h040, 32'h0000_0001, 4'hF, 0);
+    axil_read(32'h044, v); check("BW_ADDR ignores writes while busy", v, 32'h0010_0000);
+    check("BW start ignored while busy", bw_starts, 1);
+    axil_read(32'h040, v); check("BW_CTRL busy bit", v, 32'hBEEF_1003);
+    bw_busy = 1'b0;
+    axil_read(32'h04C, v); check("BW_RUNS", v, 32'd3);
+    axil_read(32'h050, v); check("BW_CYCLES", v, 32'd1000);
+    axil_read(32'h05C, v); check("BW_CLK_KHZ", v, 32'd100000);
+
     // Back-to-back reads with RREADY held high between them, as XDMA does.
     rready_idle = 1'b1; rready <= 1'b1;
     axil_read(32'h000, v); check("RREADY idle high: ID",      v, 32'h4E50_5530);
-    axil_read(32'h004, v); check("RREADY idle high: VERSION", v, 32'h0000_0200);
+    axil_read(32'h004, v); check("RREADY idle high: VERSION", v, 32'h0000_0300);
     axil_read(32'h000, v); check("RREADY idle high: ID again", v, 32'h4E50_5530);
     rready_idle = 1'b0; rready <= 1'b0;
 

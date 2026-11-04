@@ -17,6 +17,7 @@ The host side targets embedded Linux on an NXP i.MX95, the class of host that di
 | Control plane | `hw/rtl/npu_regs.v` on BAR0 | Every host-visible control and status bit of the card. Single-beat AXI-Lite, 125 MHz, on AMD's AXI4-Lite slave template (`hw/scripts/axil_template.tcl` regenerates it). [Register map](docs/register-map.md). |
 | Data plane | XDMA H2C/C2H channels into the `card_mem` block design (`hw/bd/card_mem.tcl`): SmartConnect, MIG, DDR3 SODIMM | Bulk data between host memory and card memory: 1 GiB of DDR3 at AXI address 0 (800 MT/s, 64 bits). SmartConnect converts XDMA's 64-bit, 125 MHz AXI to the MIG's 512-bit, 100 MHz port. Phase 1 used 64 KiB of BRAM. |
 | Top level | `hw/rtl/npu_top.v` | Wires the parts; owns clocks, resets and LEDs, including the debug clock. No logic of its own beyond the heartbeat and the DMA counters (`axi_dma_mon`). |
+| Card-side memory engine | `hw/rtl/mem_bw.v`, a third master on the SmartConnect, in the MIG clock domain | 512-bit AXI4 bursts (4 KiB, up to 16 in flight) that measure DDR3 bandwidth without the PCIe link and check the data they read back. Controlled from BAR0 (`BW_*`); the start of the compute engine's data movement. |
 | Debug | System ILAs, VIO and JTAG-to-AXI in `card_mem`; DMA counters and DDR status in BAR0 | Every memory-system problem can be seen from the host's registers, from Vivado over JTAG, or as AXI waveforms. [Debugging](docs/debugging.md). |
 | Host driver | Xilinx `dma_ip_drivers` XDMA, unmodified | Owns BAR1 and the descriptor rings; exposes `/dev/xdma0_*`. |
 | Host tool | `sw/tools/npu-ctl.c` | Bring-up and measurement: registers, latency, DMA loopback. Not the runtime. |
@@ -47,6 +48,8 @@ flowchart LR
 **Non-project Tcl builds.** `hw/scripts/build.tcl` runs synthesis to bitstream from source and settings alone, so a clean clone builds with one command and the repository holds no generated files. Timing failure stops the build. `hw/scripts/create_project.tcl` makes a Vivado project from the same sources for exploring in the GUI; it is disposable.
 
 **A block design only for the memory system.** The MIG, SmartConnect, System ILA and their board-preset automation work best in IP Integrator, so `card_mem` is a block design, recreated by `hw/bd/card_mem.tcl` whenever that script changes. Everything written for this project stays in Verilog.
+
+**AXI against AMD's templates.** `npu_regs` is built on Vivado's AXI4-Lite slave template and `mem_bw`'s handshakes are checked against its AXI4 master template (`hw/scripts/axil_template.tcl` regenerates both). Each block's testbench drives it the way the real peer does and has a protocol monitor; the two AXI rules that were broken during development (a read response in its address cycle, write data waiting for the address handshake) each have a test that fails against the old code.
 
 **Debug cores on their own clock.** The debug hub and VIO run from the board's Si570 oscillator through an MMCM, not from the PCIe or MIG clocks, so the Hardware Manager can still reach them when there is no host or the memory controller is in reset.
 

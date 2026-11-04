@@ -5,7 +5,8 @@
 //     BAR1  XDMA DMA engine -> AXI4 master -> card_mem: DDR3 SODIMM, 1 GiB
 //
 // card_mem is a block design (hw/bd/card_mem.tcl): the MIG DDR3 controller,
-// a SmartConnect shared with a JTAG-to-AXI master, System ILAs with AXI
+// a SmartConnect shared with a JTAG-to-AXI master and the card-side
+// bandwidth engine mem_bw, System ILAs with AXI
 // protocol checkers on both sides, and a VIO. The debug cores run from the
 // board's Si570 user clock (divided to 78.125 MHz), so Vivado's Hardware
 // Manager reaches them with no PCIe host and with the MIG in reset.
@@ -168,6 +169,17 @@ module npu_top #(
     .dma_writes      (dma_writes),
     .dma_reads       (dma_reads),
     .dma_errors      (dma_errors),
+    .bw_start        (bw_start),
+    .bw_read         (bw_read),
+    .bw_outstanding  (bw_outstanding),
+    .bw_seed         (bw_seed),
+    .bw_addr         (bw_addr),
+    .bw_len          (bw_len),
+    .bw_busy         (bw_busy),
+    .bw_runs         (bw_runs),
+    .bw_cycles       (bw_cycles),
+    .bw_mismatches   (bw_mismatches),
+    .bw_errors       (bw_errors),
     .user_led       (user_led),
     .irq_req        (usr_irq_req),
     .irq_ack        (usr_irq_ack)
@@ -194,6 +206,20 @@ module npu_top #(
   // ---------------------------------------------------------------------------
   // Card memory: DDR3 through the card_mem block design.
   wire ddr_calib_done, ddr_mmcm_locked;
+  wire ui_clk, ui_aresetn;   // MIG user clock (100 MHz) and its AXI reset
+
+  // mem_bw's AXI4 master into card_mem (S_AXI_BW)
+  wire [31:0]  bw_awaddr, bw_araddr;
+  wire [7:0]   bw_awlen, bw_arlen;
+  wire [2:0]   bw_awsize, bw_arsize;
+  wire [1:0]   bw_awburst, bw_arburst, bw_bresp, bw_rresp;
+  wire [3:0]   bw_awcache, bw_arcache;
+  wire [2:0]   bw_awprot, bw_arprot;
+  wire         bw_awlock, bw_arlock;
+  wire         bw_awvalid, bw_awready, bw_wlast, bw_wvalid, bw_wready, bw_bvalid, bw_bready;
+  wire         bw_arvalid, bw_arready, bw_rlast, bw_rvalid, bw_rready;
+  wire [511:0] bw_wdata, bw_rdata;
+  wire [63:0]  bw_wstrb;
 
   card_mem card_mem (
     .pcie_aclk    (axi_aclk),
@@ -221,10 +247,49 @@ module npu_top #(
     .ddr3_sdram_dm      (ddr3_dm),      .ddr3_sdram_dq      (ddr3_dq),
     .ddr3_sdram_dqs_p   (ddr3_dqs_p),   .ddr3_sdram_dqs_n   (ddr3_dqs_n),
     .ddr3_sdram_reset_n (ddr3_reset_n),
+    .ui_clk     (ui_clk),
+    .ui_aresetn (ui_aresetn),
+    .S_AXI_BW_awaddr  (bw_awaddr),  .S_AXI_BW_awlen  (bw_awlen),  .S_AXI_BW_awsize  (bw_awsize),
+    .S_AXI_BW_awburst (bw_awburst), .S_AXI_BW_awvalid (bw_awvalid), .S_AXI_BW_awready (bw_awready),
+    .S_AXI_BW_awcache (bw_awcache), .S_AXI_BW_awprot  (bw_awprot),  .S_AXI_BW_awlock  (bw_awlock),
+    .S_AXI_BW_wdata   (bw_wdata),   .S_AXI_BW_wstrb  (bw_wstrb),  .S_AXI_BW_wlast   (bw_wlast),
+    .S_AXI_BW_wvalid  (bw_wvalid),  .S_AXI_BW_wready (bw_wready),
+    .S_AXI_BW_bresp   (bw_bresp),   .S_AXI_BW_bvalid (bw_bvalid), .S_AXI_BW_bready  (bw_bready),
+    .S_AXI_BW_araddr  (bw_araddr),  .S_AXI_BW_arlen  (bw_arlen),  .S_AXI_BW_arsize  (bw_arsize),
+    .S_AXI_BW_arburst (bw_arburst), .S_AXI_BW_arvalid (bw_arvalid), .S_AXI_BW_arready (bw_arready),
+    .S_AXI_BW_arcache (bw_arcache), .S_AXI_BW_arprot  (bw_arprot),  .S_AXI_BW_arlock  (bw_arlock),
+    .S_AXI_BW_rdata   (bw_rdata),   .S_AXI_BW_rresp  (bw_rresp),  .S_AXI_BW_rlast   (bw_rlast),
+    .S_AXI_BW_rvalid  (bw_rvalid),  .S_AXI_BW_rready (bw_rready),
     .dbg_clk         (dbg_clk),
     .ddr_rst         (cpu_reset),
     .ddr_calib_done  (ddr_calib_done),
     .ddr_mmcm_locked (ddr_mmcm_locked)
+  );
+
+  // Card-side DDR3 bandwidth engine, controlled from npu_regs (BW_*).
+  wire        bw_start, bw_read, bw_busy;
+  wire [4:0]  bw_outstanding;
+  wire [15:0] bw_seed;
+  wire [31:0] bw_addr, bw_len, bw_runs, bw_cycles, bw_mismatches, bw_errors;
+
+  mem_bw bw (
+    .ctl_clk (axi_aclk), .ctl_rst_n (axi_aresetn),
+    .ctl_start (bw_start), .ctl_read (bw_read), .ctl_addr (bw_addr), .ctl_len (bw_len),
+    .ctl_outstanding (bw_outstanding), .ctl_seed (bw_seed),
+    .ctl_busy (bw_busy), .ctl_cycles (bw_cycles), .ctl_mismatches (bw_mismatches),
+    .ctl_errors (bw_errors), .ctl_runs (bw_runs),
+    .m_clk (ui_clk), .m_rst_n (ui_aresetn),
+    .m_axi_awaddr (bw_awaddr), .m_axi_awlen (bw_awlen), .m_axi_awsize (bw_awsize), .m_axi_awburst (bw_awburst),
+    .m_axi_awcache (bw_awcache), .m_axi_awprot (bw_awprot), .m_axi_awlock (bw_awlock),
+    .m_axi_awvalid (bw_awvalid), .m_axi_awready (bw_awready),
+    .m_axi_wdata (bw_wdata), .m_axi_wstrb (bw_wstrb), .m_axi_wlast (bw_wlast),
+    .m_axi_wvalid (bw_wvalid), .m_axi_wready (bw_wready),
+    .m_axi_bresp (bw_bresp), .m_axi_bvalid (bw_bvalid), .m_axi_bready (bw_bready),
+    .m_axi_araddr (bw_araddr), .m_axi_arlen (bw_arlen), .m_axi_arsize (bw_arsize), .m_axi_arburst (bw_arburst),
+    .m_axi_arcache (bw_arcache), .m_axi_arprot (bw_arprot), .m_axi_arlock (bw_arlock),
+    .m_axi_arvalid (bw_arvalid), .m_axi_arready (bw_arready),
+    .m_axi_rdata (bw_rdata), .m_axi_rresp (bw_rresp), .m_axi_rlast (bw_rlast),
+    .m_axi_rvalid (bw_rvalid), .m_axi_rready (bw_rready)
   );
 
   // DMA traffic counters for npu_regs.

@@ -7,7 +7,8 @@
 // read, after cleaning and invalidating the buffer's cache lines from user
 // space (DC CIVAC), after 100 ms, and after a second flush. A count that drops
 // to zero after the flush means the data had reached memory and the CPU was
-// reading stale lines. See docs/bringup.md, "Problems found".
+// reading stale lines. It found the XDMA driver bug patched by
+// sw/patches/xdma-unmap-orig-nents.patch; see docs/bringup.md, "Problems found".
 //
 // Build: make cacheprobe CC=aarch64-linux-gnu-gcc
 

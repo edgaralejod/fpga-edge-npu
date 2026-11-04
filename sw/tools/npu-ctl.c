@@ -10,6 +10,8 @@
 //                                   DMA loopback through card memory
 //   npu-ctl memtest [chunk bytes]   write all of card memory, then read it all
 //                                   back and check it (address-dependent data)
+//   npu-ctl bwtest [bytes] [bursts] card-side DDR3 bandwidth (mem_bw engine):
+//                                   write then read-and-check, bursts in flight 1..16
 //
 // BAR0 is reached through the Xilinx XDMA driver's /dev/xdma0_user when it is
 // loaded, otherwise through sysfs (resource0 of the first 10ee:7021 device,
@@ -47,6 +49,15 @@
 #define REG_DMA_WR   0x030
 #define REG_DMA_RD   0x034
 #define REG_DMA_ERR  0x038
+#define REG_BW_CTRL  0x040
+#define REG_BW_ADDR  0x044
+#define REG_BW_LEN   0x048
+#define REG_BW_RUNS  0x04C
+#define REG_BW_CYC   0x050
+#define REG_BW_MISM  0x054
+#define REG_BW_ERR   0x058
+#define REG_BW_CLK   0x05C
+#define DDR3_PEAK_MBS 6400.0 /* 800 MT/s x 8 bytes */
 
 #define NPU_ID_VALUE  0x4E505530u /* "NPU0" */
 #define CARD_CLOCK_HZ 125000000.0
@@ -151,6 +162,8 @@ static int cmd_info(void) {
   printf("\n");
   if (has_ddr())
     printf("dma axi   %u writes, %u reads, %u error responses\n", rd(REG_DMA_WR), rd(REG_DMA_RD), rd(REG_DMA_ERR));
+  if ((ver & 0xffff00) >= 0x000300)
+    printf("mem_bw    %u runs, %s, clock %u kHz\n", rd(REG_BW_RUNS), (rd(REG_BW_CTRL) & 1) ? "busy" : "idle", rd(REG_BW_CLK));
   printf("uptime    %.3f s\n", cycles() / CARD_CLOCK_HZ);
   return 0;
 }
@@ -289,11 +302,53 @@ static int cmd_memtest(size_t chunk) {
   return (bad || errs) ? 1 : 0;
 }
 
+// One mem_bw run; returns the memory-clock cycles, or -1 on timeout.
+static int64_t bw_run(int read, uint32_t addr, uint32_t len, unsigned bursts, uint16_t seed) {
+  uint32_t runs = rd(REG_BW_RUNS);
+  wr(REG_BW_ADDR, addr);
+  wr(REG_BW_LEN, len);
+  wr(REG_BW_CTRL, ((uint32_t)seed << 16) | ((bursts & 0x1f) << 8) | (read ? 2u : 0u) | 1u);
+  double t0 = now_s();
+  while (rd(REG_BW_RUNS) == runs) {
+    if (now_s() - t0 > 10.0) return -1;
+  }
+  return rd(REG_BW_CYC);
+}
+
+static int cmd_bwtest(uint64_t bytes, unsigned bursts) {
+  if ((rd(REG_VERSION) & 0xffff00) < 0x000300) {
+    fprintf(stderr, "npu-ctl: bwtest needs card version 0.3.0 or later\n");
+    return 1;
+  }
+  uint64_t mem = card_mem_bytes();
+  if (bytes == 0 || bytes % 4096 || bytes > mem || bytes > 0xFFFFF000u) {
+    fprintf(stderr, "npu-ctl: bytes must be a multiple of 4096, at most %" PRIu64 "\n", mem);
+    return 1;
+  }
+  if (bursts < 1 || bursts > 16) { fprintf(stderr, "npu-ctl: bursts in flight must be 1..16\n"); return 1; }
+  if (require_memory()) return 1;
+  double khz = rd(REG_BW_CLK);
+  uint16_t seed = (uint16_t)time(NULL);
+  int64_t wc = bw_run(0, 0, (uint32_t)bytes, bursts, seed);
+  if (wc < 0) { fprintf(stderr, "npu-ctl: write run timed out\n"); return 1; }
+  uint32_t werr = rd(REG_BW_ERR);
+  int64_t rc = bw_run(1, 0, (uint32_t)bytes, bursts, seed);
+  if (rc < 0) { fprintf(stderr, "npu-ctl: read run timed out\n"); return 1; }
+  uint32_t rerr = rd(REG_BW_ERR), mism = rd(REG_BW_MISM);
+  double wmbs = bytes / 1e6 / (wc / (khz * 1e3)), rmbs = bytes / 1e6 / (rc / (khz * 1e3));
+  int ok = !werr && !rerr && !mism;
+  printf("bwtest    %" PRIu64 " MiB, %u bursts of 4 KiB in flight: write %.0f MB/s (%.0f %%), read %.0f MB/s (%.0f %%) of %.0f MB/s peak;"
+         " %u mismatched beats, %u AXI errors: %s\n",
+         bytes >> 20, bursts, wmbs, 100 * wmbs / DDR3_PEAK_MBS, rmbs, 100 * rmbs / DDR3_PEAK_MBS, DDR3_PEAK_MBS,
+         mism, werr + rerr, ok ? "PASS" : "FAIL");
+  return ok ? 0 : 1;
+}
+
 static void usage(void) {
   fprintf(stderr,
           "usage: npu-ctl info | read <off> | write <off> <val> | led <0..3> |\n"
           "               regtest [count] | latency [count] | dmatest [bytes] [loops] [offset] |\n"
-          "               memtest [chunk bytes]\n");
+          "               memtest [chunk bytes] | bwtest [bytes] [bursts in flight]\n");
 }
 
 int main(int argc, char **argv) {
@@ -317,6 +372,8 @@ int main(int argc, char **argv) {
     return cmd_dmatest(argc > 2 ? strtoul(argv[2], NULL, 0) : 65536, argc > 3 ? atoi(argv[3]) : 100,
                        argc > 4 ? strtoull(argv[4], NULL, 0) : 0);
   if (!strcmp(cmd, "memtest")) return cmd_memtest(argc > 2 ? strtoul(argv[2], NULL, 0) : 4u << 20);
+  if (!strcmp(cmd, "bwtest"))
+    return cmd_bwtest(argc > 2 ? strtoull(argv[2], NULL, 0) : card_mem_bytes(), argc > 3 ? (unsigned)atoi(argv[3]) : 16);
   usage();
   return 2;
 }
