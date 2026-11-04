@@ -1,0 +1,41 @@
+# Everything Vivado and the simulators generate lands in build/: bitstreams,
+# flash images, generated AMD IP, reports, simulation work. Never committed.
+/build/
+
+# Vivado and XSim leftovers when run outside build/
+.Xil/
+*.jou
+*.log
+*.str
+*.pb
+*.wdb
+*.cache/
+*.runs/
+*.sim/
+*.hw/
+*.ip_user_files/
+*.gen/
+*.xpr
+xsim.dir/
+webtalk*
+usage_statistics_webtalk.*
+hs_err_pid*.log
+clockInfo.txt
+
+# Host tools and kernel modules
+sw/tools/npu-ctl
+sw/tools/cacheprobe
+*.o
+*.ko
+*.mod
+*.mod.c
+*.cmd
+Module.symvers
+modules.order
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store

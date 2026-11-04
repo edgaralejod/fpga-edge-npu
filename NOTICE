@@ -1,0 +1,11 @@
+fpga-edge-npu
+Copyright 2026 Edgar Duarte and Virtu Services LLC
+
+This product includes software and hardware descriptions developed by
+Edgar Duarte, published by Virtu Services LLC (https://virtu-services.us).
+
+The build scripts generate AMD (Xilinx) IP cores, including the DMA/Bridge
+Subsystem for PCI Express (XDMA) and the AXI BRAM Controller, from settings in
+hw/scripts/ip.tcl. Those cores are not part of this repository and are subject
+to AMD's own license terms. The host DMA driver is AMD's dma_ip_drivers,
+obtained separately under its own license.

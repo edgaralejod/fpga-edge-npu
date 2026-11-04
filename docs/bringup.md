@@ -1,0 +1,130 @@
+# Bring-up: phase 1, PCIe link
+
+This is the procedure for getting the FRDM-i.MX95 and the AC701 talking, and the record of what has been checked. Connect the boards first ([hardware setup](hardware-setup.md)).
+
+## 1. Build and flash the card
+
+On the build machine:
+
+```sh
+make bitstream          # build/npu_top.bit, build/npu_top.mcs
+make flash              # write the SPI flash over JTAG, then reboot the FPGA from it
+make status             # mode pins and DONE, read over JTAG
+```
+
+When Vivado runs in a container, pass the prefix, for example `make flash XRUN="fpga run 2025.2 --"`. Vivado starts its own `hw_server` inside the container; the container needs the host's USB devices and network.
+
+The AC701 boots from flash only when mode switch SW1 is at `001` (master SPI): position 1 (M2) off, position 3 (M0) on, position 2 not connected. At `101` it waits for JTAG, and `make flash` stops after verifying the flash with a message saying so. Power-cycle the board after changing SW1; DONE (DS10) lights and `make status` reports `M[2:0] = 001`, `DONE = 1`.
+
+After a flash boot, GPIO_LED_1 (heartbeat) stays dark until a host supplies the PCIe reference clock; that is expected.
+
+## 2. Boot the host and check enumeration
+
+Power the AC701 first, wait for DONE, then power the FRDM-i.MX95. On the i.MX95:
+
+```sh
+lspci -nn
+#   0001:01:00.0 Processing accelerators [1200]: Xilinx Corporation Device [10ee:7021]
+sudo lspci -vv -s <bdf> | grep -E 'LnkCap:|LnkSta:|Region'
+#   LnkSta: Speed 5GT/s, Width x1     <- Gen2 x1 is the expected result
+#   Region 0: Memory at ... size=64K  <- BAR0, npu_regs
+#   Region 1: Memory at ... size=64K  <- BAR1, XDMA engine
+dmesg | grep -i pci                   # link training messages from the i.MX PCIe controller
+```
+
+On the card, GPIO_LED_0 lights at link up and GPIO_LED_1 blinks.
+
+## 3. Registers, no driver needed
+
+Copy `npu-ctl` to the i.MX95 (build it with `make tools CC=aarch64-linux-gnu-gcc`, or with the i.MX Yocto SDK's compiler). The NXP BSP image includes `gcc`, so copying `sw/tools/npu-ctl.c` and building it on the board also works. Run `sync` before powering the board off: a file written shortly before a power cut can come back empty. Without a driver bound, `npu-ctl` enables the device through sysfs and maps BAR0 from `resource0`, which needs root:
+
+```sh
+sudo ./npu-ctl info
+sudo ./npu-ctl regtest 1000000
+sudo ./npu-ctl latency 100000
+sudo ./npu-ctl led 3            # GPIO_LED_2 and 3 on
+```
+
+## 4. DMA with the Xilinx XDMA driver
+
+The DMA engine needs a kernel driver to own its descriptor rings and interrupts. Phase 1 uses AMD's reference driver unchanged ([dma_ip_drivers](https://github.com/Xilinx/dma_ip_drivers), tested at commit `a918c51`, driver v2025.2.0).
+
+NXP's BSP image has no kernel build tree on the board, and the kernel has `CONFIG_MODVERSIONS=y`, so the module is cross-compiled against the matching NXP kernel source, configured with the board's own `/proc/config.gz` and built once to produce `Module.symvers`:
+
+```sh
+# on the build machine; kernel 6.18.2-1.0.0-gf49f45233f7b is NXP lf-6.18.2-1.0.0
+git clone --depth 1 --branch lf-6.18.2-1.0.0 https://github.com/nxp-imx/linux-imx
+mkdir kbuild && cp <config from the board's /proc/config.gz, unzipped> kbuild/.config
+K="make -C linux-imx O=$PWD/kbuild ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LOCALVERSION=-1.0.0"
+$K olddefconfig && $K kernelrelease      # must print the board's uname -r
+$K -j$(nproc) Image modules              # about 12 minutes; produces Module.symvers
+git clone https://github.com/Xilinx/dma_ip_drivers
+cd dma_ip_drivers/XDMA/linux-kernel/xdma
+$K M=$PWD ccflags-y=-I$PWD/../include modules
+aarch64-linux-gnu-strip --strip-debug xdma.ko
+```
+
+The driver's Makefile passes its include path in `EXTRA_CFLAGS`, which Linux 6.18 no longer reads; `ccflags-y` replaces it. Arch Linux's cross compiler is GCC 16.2 and NXP built the kernel with GCC 15.2; the module loads and runs.
+
+On the i.MX95, load it with the script, which first puts the card's IOMMU group in pass-through mode (see "Problems found"):
+
+```sh
+sudo sw/scripts/imx95-load-xdma.sh ./xdma.ko   # creates /dev/xdma0_user, _h2c_0, _c2h_0, _events_*
+sudo ./npu-ctl info                            # now through /dev/xdma0_user
+sudo ./npu-ctl dmatest 65536 100
+```
+
+To check the interrupt path, wait for user interrupt 0 and raise it from the `IRQ` register:
+
+```sh
+dd if=/dev/xdma0_events_0 bs=4 count=1 | od -An -tx4 &   # returns when the MSI arrives
+sudo ./npu-ctl write 0x28 1                                # IRQ[0]: request
+sudo ./npu-ctl read 0x28                                   # 0x3: requested and acknowledged
+sudo ./npu-ctl write 0x28 0; sudo ./npu-ctl write 0x28 2   # release, clear the ack
+```
+
+If interrupts do not arrive, load the driver with `poll_mode=1` to separate MSI problems from DMA problems.
+
+## Expected numbers
+
+Gen2 x1 carries 5 GT/s with 8b/10b coding: 500 MB/s per direction before packet overhead. Each DMA transfer through the XDMA character devices also pays a fixed cost for pinning pages, building descriptors and the completion interrupt, so small transfers run far below the link rate.
+
+Measured 2026-11-04 (FRDM-i.MX95, NXP BSP 6.18-whinlatter, IOMMU pass-through, `npu-ctl dmatest <size> 1000`, card memory 64 KiB BRAM):
+
+| Transfer | Host to card | Card to host |
+| --- | --- | --- |
+| 8 B | 0.2 MB/s | 0.2 MB/s |
+| 4 KiB | 90.7 MB/s | 92.9 MB/s |
+| 8 KiB | 141.5 MB/s | 144.6 MB/s |
+| 32 KiB | 243.6 MB/s | 246.2 MB/s |
+| 64 KiB | 291.1 MB/s | 289.3 MB/s |
+
+The 8-byte case puts the fixed cost per transfer at about 40 µs. Larger transfers need more card memory than the phase 1 BRAM; phase 2 moves card memory to DDR3.
+
+## Checklist
+
+| Check | Expected | Result |
+| --- | --- | --- |
+| Bitstream builds from a clean clone, timing met | WNS ≥ 0, WHS ≥ 0 | Pass, 2026-11-03 (Vivado 2025.2; WNS +0.600 ns, WHS +0.036 ns clean; 8.7 % of LUTs, 10 % of block RAM). 0.1.1 rebuilt 2026-11-04: WNS +0.543 ns, WHS +0.036 ns |
+| `npu_regs` testbench | `RESULT: PASS` | Pass, 2026-11-04 (20 checks and the protocol monitor, XSim 2025.2) |
+| `npu-ctl` builds for aarch64 | No warnings | Pass, 2026-11-03 (Vivado's bundled aarch64 GCC) |
+| JTAG through `hw_server` in the container | `xc7a200t_0` on the chain | Pass, 2026-11-04 (Digilent U26, serial 210203AF54D0A) |
+| `make program` | End of startup HIGH | Pass, 2026-11-04 |
+| SPI flash programs and the FPGA boots from it | DONE lit after power cycle | Pass, 2026-11-04 (N25Q256, JEDEC ID `20 BA 19`, written as `mt25ql256`; erase, program and verify 73 s; with SW1 at 001, DONE = 1 after power cycle) |
+| `lspci` on the i.MX95 shows `10ee:7021`, class 1200 | Present | Pass, 2026-11-04 (NXP BSP 6.18-whinlatter, kernel 6.18.2; `0000:01:00.0`, both 64 KiB BARs assigned) |
+| Link speed and width | 5 GT/s, x1 | Pass, 2026-11-04 (`LnkSta: Speed 5GT/s, Width x1`; the i.MX95 port is 8 GT/s capable) |
+| `npu-ctl info` | ID `NPU0`, version 0.1.1 | Pass, 2026-11-04 (build `26110415`, caps `0x00400001`, link up) |
+| `npu-ctl regtest 1000000` | PASS | Pass, 2026-11-04 (10⁶ writes, 0 errors; no AER errors afterwards, link still Gen2 x1) |
+| `npu-ctl latency` | Record value | 1183 ns per BAR0 read, measured 2026-11-04 (`latency 100000`, two runs: 1184 and 1183 ns; Cortex-A55 user space, sysfs `resource0` mapping, Gen2 x1, i.MX95 BSP 6.18-whinlatter) |
+| XDMA driver loads on the i.MX95 kernel | Device nodes created | Pass, 2026-11-04 (dma_ip_drivers `a918c51`, cross-compiled; BAR0 user, BAR1 config, 1 H2C + 1 C2H channel, MSI enabled) |
+| `npu-ctl dmatest 65536 100` | PASS; record both directions | Pass, 2026-11-04, with IOMMU pass-through (10 000 loops of 64 KiB, 0 errors; 291.8 MB/s host to card, 289.7 MB/s card to host). Fails with the IOMMU translating; see below |
+| MSI from `IRQ` register reaches the driver | Interrupt count rises | Pass, 2026-11-04 (`/dev/xdma0_events_0` returned 1; MSI count 30206 to 30207; `IRQ` read `0x3`) |
+
+## Problems found
+
+| Date | Symptom | Cause | Fix |
+| --- | --- | --- | --- |
+| 2026-11-04 | The first BAR0 read after reset returned the right value; every later BAR0 read returned `0xFFFFFFFF`. BAR1 reads and BAR0 writes still worked. Long `npu-ctl` loops stalled the i.MX95. | `npu_regs` 0.1.0 raised RVALID in the same cycle as the read-address handshake. XDMA holds RREADY high between reads, so the block counted the response as delivered while XDMA had dropped it, and XDMA's AXI-Lite master waited forever. | 0.1.1 rebuilds `npu_regs` on AMD's AXI4-Lite template, which raises RVALID one cycle later. The testbench now holds RREADY high between reads and has a protocol monitor; it reports 19 errors against the old behavior. |
+| 2026-11-04 | With the XDMA driver loaded, `dmatest` passed at 4 KiB and failed at every larger size: card-to-host transfers returned stale data (mostly the zeros the buffer was cleared to) in every 4 KiB page after the first. Host-to-card transfers, card memory and single-page transfers at any card offset were all correct. | Card-to-host DMA through the i.MX95's SMMU (IOMMU group type `DMA`). After a transfer, flushing the buffer's CPU cache lines (`DC CIVAC` from user space) made all data correct, so it had reached memory; the CPU was reading stale lines. Disabling relaxed ordering and No Snoop on the card, and the driver's `poll_mode=1`, did not help. With the group in pass-through (`identity`) every test passes. Whether the SMMU path delivers the data after the completion is signalled or the IOMMU DMA layer misses cache maintenance for this non-coherent port is not yet known. | `sw/scripts/imx95-load-xdma.sh` sets the card's IOMMU group to pass-through before loading the driver. `sw/tools/cacheprobe` reproduces the problem: FAIL with the group in `DMA` mode, PASS in pass-through (checked 2026-11-04). |
+
+Record each hardware result with the date, the i.MX95 BSP version, and the exact command.
