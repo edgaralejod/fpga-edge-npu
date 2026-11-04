@@ -1,4 +1,4 @@
-import { hero, timeLadder, bandwidth, dmaBySize, doc } from "./data.js";
+import { hero, timeLadder, bandwidth, dmaBySize, mnist, doc } from "./data.js";
 
 const SVGNS = "http://www.w3.org/2000/svg";
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -25,52 +25,53 @@ const NODES = {
   dram: { x: 40,  y: 340, w: 190, name: "Host DRAM", meta: "8 GB LPDDR4X", domain: "mem" },
   smmu: { x: 250, y: 340, w: 170, name: "SMMU (IOMMU)", meta: "Arm SMMUv3", domain: "host" },
   rc:   { x: 250, y: 205, w: 170, name: "PCIe root complex", meta: "i.MX95, Gen3-capable", domain: "host" },
-  ep:   { x: 560, y: 205, w: 170, name: "PCIe endpoint", meta: "AMD XDMA, 10ee:7021", domain: "card" },
+  ep:   { x: 560, y: 205, w: 170, name: "PCIe bridge", meta: "AMD axi_pcie, 10ee:ed10", domain: "card" },
+  cq:   { x: 560, y: 340, w: 170, name: "npu_cq", meta: "command queue + DMA", domain: "card" },
   regs: { x: 560, y: 70,  w: 170, name: "npu_regs", meta: "BAR0 control", domain: "card" },
   sc:   { x: 780, y: 205, w: 180, name: "AXI interconnect", meta: "SmartConnect, 3 masters", domain: "card" },
   bw:   { x: 780, y: 70,  w: 180, name: "mem_bw", meta: "512-bit burst engine", domain: "card" },
   dbg:  { x: 780, y: 340, w: 180, name: "Debug cores", meta: "2 ILAs, VIO, JTAG-AXI", domain: "debug" },
   mig:  { x: 1000, y: 205, w: 160, name: "Memory controller", meta: "AMD MIG, 100 MHz", domain: "mem" },
   ddr:  { x: 1000, y: 340, w: 160, name: "DDR3 1 GiB", meta: "800 MT/s, 64-bit", domain: "mem" },
-  npu:  { x: 1000, y: 70,  w: 160, name: "NPU engine", meta: "phase 4, planned", domain: "card", future: true },
+  npu:  { x: 1000, y: 70,  w: 160, name: "npu_mm", meta: "INT8 GEMM engine", domain: "card" },
 };
 const H = 76;
 const center = (id) => { const n = NODES[id]; return [n.x + n.w / 2, n.y + H / 2]; };
-const EDGES = [["cpu", "rc"], ["cpu", "dram"], ["dram", "smmu"], ["smmu", "rc"], ["rc", "ep", "link"], ["ep", "regs"], ["ep", "sc"],
-  ["bw", "sc"], ["dbg", "sc"], ["sc", "mig"], ["mig", "ddr"], ["npu", "sc", "future"], ["regs", "bw"]];
+const EDGES = [["cpu", "rc"], ["cpu", "dram"], ["dram", "smmu"], ["smmu", "rc"], ["rc", "ep", "link"], ["ep", "regs"], ["ep", "cq"],
+  ["regs", "cq"], ["cq", "sc"], ["bw", "sc"], ["dbg", "sc"], ["sc", "mig"], ["mig", "ddr"], ["npu", "sc"], ["regs", "bw"]];
 const edgeKey = (a, b) => [a, b].sort().join("-");
 
 const INFO = {
   cpu: {
-    p: "Six Cortex-A55 cores run Linux, the driver and the test tools. To the CPU the card is a range of physical addresses. A register access is an uncached load or store into that range, and the core stalls until the answer comes back across the link.",
-    facts: [["Register read, round trip", "1.18 µs", "measured"], ["Card clock periods in that time", "≈ 148", "derived"]],
-    found: "The CPU's caches were where the XDMA driver bug showed up: card data was in DRAM, but the CPU kept reading old copies from its cache.",
+    p: "Six Cortex-A55 cores run Linux, the driver and the runtime. To the CPU the card is a range of physical addresses. A register access is an uncached load or store into that range, and the core stalls until the answer comes back across the link. To give the card work, the runtime writes commands into memory and rings a doorbell; it never waits on a register read.",
+    facts: [["Register read, round trip", "1.18 µs", "measured"], ["One command, doorbell to completion seen", "3.83 µs", "measured"], ["Same, sleeping on the interrupt", "13.8 µs", "measured"]],
+    found: "Phase 2: the CPU's caches were where the XDMA driver bug showed up: card data was in DRAM, but the CPU kept reading old copies from its cache.",
   },
   dram: {
-    p: "Host memory holds the buffers the card reads and writes. DMA never touches the CPU's caches here: the CPU has to clean its caches before the card reads a buffer and invalidate them after the card writes one, because this port is not cache-coherent.",
-    facts: [["Size", "8 GB LPDDR4X", "spec"]],
+    p: "Host memory holds the card's queues and buffers: the fpga-npu driver allocates a 32 MiB arena the card can reach and maps it, uncached, into the runtime. The submission queue (64-byte commands), the completion queue (16-byte entries) and every tensor live there. Because the CPU never caches the arena, no cache maintenance is needed: the trap the XDMA driver fell into cannot happen.",
+    facts: [["Size", "8 GB LPDDR4X", "spec"], ["DMA arena", "32 MiB, uncached", "measured"]],
   },
   smmu: {
     p: "The IOMMU translates the addresses the card uses (I/O virtual addresses) into physical ones, so the card can only reach buffers the driver mapped for it. It also lets the kernel present scattered 4 KiB pages as one contiguous range to the card.",
-    facts: [["Card's stream ID", "0x11", "measured"], ["Pages in a 64 KiB buffer", "16 → 1 range", "measured"]],
-    found: "Merging 16 pages into one range exposed a bug in AMD's XDMA driver: it released buffers using the merged count, so the CPU cache was refreshed for the first page only. Fixed with a two-line patch; the IOMMU now stays on.",
+    facts: [["Card's stream ID", "0x11", "measured"], ["Arena, as the card sees it", "bus 0x7e000000, contiguous", "measured"]],
+    found: "Phase 2: merging 16 pages into one range exposed a bug in AMD's XDMA driver: it released buffers using the merged count, so the CPU cache was refreshed for the first page only. Fixed with a two-line patch. Since phase 3 the project's own driver keeps the IOMMU translating.",
   },
   rc: {
     p: "The i.MX95's PCIe controller turns CPU loads and stores into PCIe requests, and the card's DMA requests into memory accesses. The M.2 slot is wired for one lane; the controller can run Gen3, but the Artix-7 tops out at Gen2.",
     facts: [["Link trained at", "5 GT/s × 1", "measured"], ["Controller capability", "8 GT/s", "measured"]],
   },
   ep: {
-    p: "AMD's DMA/Bridge Subsystem is the card's PCIe endpoint. BAR0 is turned into AXI-Lite accesses to the card's registers; BAR1 holds a DMA engine that moves data between host memory and card memory over a 64-bit AXI bus at 125 MHz.",
-    facts: [["PCI ID, class", "10ee:7021, 12 00 00", "measured"], ["DMA to card, 16 MiB", "371 MB/s", "measured"], ["DMA to host, 4 MiB", "340 MB/s", "measured"]],
-    found: "Phase 3 replaces it with AMD's AXI-PCIe bridge and a DMA engine of the project's own, so the card can fetch commands from host memory itself.",
+    p: "AMD's AXI Memory Mapped to PCI Express bridge is the card's PCIe endpoint, and only a bridge: no DMA engine of its own. Host reads and writes to BAR0 come out as AXI accesses to the card's registers; AXI accesses from the card's npu_cq go out as PCIe reads and writes of host memory. Moving data is the card's own job.",
+    facts: [["PCI ID, class", "10ee:ed10, 12 00 00", "measured"], ["Link", "5 GT/s × 1, MSI", "measured"], ["AXI side", "64 bits at 125 MHz", "spec"]],
+    found: "Phases 1 and 2 used AMD's XDMA core here, with its own DMA engine and driver; phase 3 replaced it so the card can fetch its own commands.",
   },
   regs: {
-    p: "The card's control registers: identity, version, a scratch register, a cycle counter for latency measurements, interrupt control, memory status, DMA counters, and the controls of the bandwidth engine. Every host-visible bit of the card lives here.",
-    facts: [["Version on the card", "0.3.0", "measured"], ["Write/read test", "10⁶ writes, 0 errors", "measured"]],
+    p: "The card's control registers: identity, version, a cycle counter, interrupt control, memory status, DMA counters, the bandwidth engine's controls, and the command queue's: where the rings are, how big, and the two doorbells. Writing SQ_TAIL is the only thing the host does to start work.",
+    facts: [["Version on the card", "0.5.0", "measured"], ["Write/read test", "10⁶ writes, 0 errors", "measured"]],
     found: "Version 0.1.0 answered a read in the same clock cycle as its address. AXI forbids it; XDMA dropped the answer and every later read returned 0xFFFFFFFF. Rebuilt on AMD's AXI4-Lite template.",
   },
   sc: {
-    p: "AMD's SmartConnect joins three masters to the memory controller: the PCIe DMA engine (64 bits at 125 MHz), the bandwidth engine (512 bits at 100 MHz) and the JTAG-to-AXI master. It converts widths and crosses clock domains.",
+    p: "AMD's SmartConnect joins three masters to the memory controller: npu_cq's card port (64 bits at 125 MHz, shared by its copies and the GEMM engine), the bandwidth engine (512 bits at 100 MHz) and the JTAG-to-AXI master. It converts widths and crosses clock domains.",
     facts: [["Masters", "3", "spec"], ["Error responses after GBs of DMA", "0", "measured"]],
   },
   bw: {
@@ -82,6 +83,11 @@ const INFO = {
     p: "Two System ILAs (logic analyzers with AXI protocol checkers) watch both sides of the interconnect. A VIO shows memory calibration and resets the controller; a JTAG-to-AXI master reads and writes DDR3 from Vivado. They run on their own 78 MHz clock, so they work with no host attached.",
     facts: [["Capture depth", "2048 and 1024 samples", "spec"], ["DDR3 test over JTAG", "29 addresses × 5 patterns", "measured"]],
   },
+  cq: {
+    p: "The card's command processor, written for this project. After a doorbell it fetches each 64-byte command from the host's submission queue over PCIe, runs it (NOP, a copy either way between host and card memory, or a GEMM on npu_mm), and writes a 16-byte completion with a phase bit, its status and two timestamps back into host memory, with an MSI if asked. Copies stream through an 8 KiB FIFO in 2 KiB bursts, up to four reads in flight.",
+    facts: [["Commands per second (NOPs)", "503 000", "measured"], ["Copy, host to card, 8 MiB", "419 MB/s", "measured"], ["Copy, card to host, 8 MiB", "416 MB/s", "measured"], ["Executing a NOP", "8 ns (1 cycle)", "measured"]],
+    found: "Its copy engine first missed timing at 125 MHz: deciding the next read took a chain of 32-bit subtracts and compares in one clock cycle. The decision is now made from registers a cycle early.",
+  },
   mig: {
     p: "AMD's Memory Interface Generator drives the DDR3 module: it calibrates the timing of every data line at power-up, refreshes the memory, and schedules reads and writes. Its user side is 512 bits wide at 100 MHz.",
     facts: [["Calibration", "first power-up", "measured"], ["User clock", "100 MHz", "spec"]],
@@ -91,8 +97,9 @@ const INFO = {
     facts: [["Peak", "6400 MB/s", "spec"], ["Read, measured inside the card", "5921 MB/s", "measured"], ["Verified", "1 GiB, every beat", "measured"]],
   },
   npu: {
-    p: "Phase 4 adds the part that computes: an INT8 matrix-multiply engine on the FPGA's 740 DSP slices, fed from DDR3 and driven by commands from the queue built in phase 3, checked bit for bit against a Python model.",
-    facts: [["DSP slices available", "740", "spec"]],
+    p: "The part that computes: C = A · Bᵀ + bias in INT8 with INT32 sums, then scaled, rounded, ReLU'd and clamped back to INT8, or kept as INT32. It works on tiles of 8 rows of A: each 8-byte beat of weights read from DDR3 meets 8 rows at once, 64 multiply-accumulates per clock. Checked bit for bit against a Python model, in simulation and on the card.",
+    facts: [["Multipliers", "64 DSP slices of 740", "measured"], ["Peak", "64 MAC × 125 MHz = 8 GMAC/s", "derived"]],
+    found: "The first version wrote nothing for N = 1024: it sized the output from N's low 10 bits, which are all zero. Found by npu-test on the card; the testbench now covers the limits.",
   },
 };
 
@@ -165,30 +172,42 @@ const FLOWS = [
     ],
   },
   {
-    id: "h2c", name: "DMA: host to card", total: "371 MB/s at 16 MiB, measured; ~40 µs fixed cost per transfer, derived",
+    id: "cmd", name: "One command, start to finish", total: "3.83 µs round trip, median of 2000, measured; 503 000 commands/s in batches",
     steps: [
-      { path: ["cpu", "dram"], text: "The driver pins the user buffer's pages and maps them for the card. Mapping cleans the CPU's caches, so DRAM holds the latest data.", t: "Part of the ~40 µs fixed cost per transfer" },
-      { path: ["dram", "smmu"], text: "The IOMMU maps the buffer's scattered 4 KiB pages to one contiguous I/O address range for the card." },
-      { path: ["cpu", "rc"], text: "The driver writes the DMA descriptors' location and starts the engine with register writes over PCIe." },
-      { path: ["ep", "rc"], text: "The card's DMA engine sends Memory Read requests for the buffer." },
-      { path: ["smmu", "dram"], text: "The root complex fetches the data from DRAM through the IOMMU's translation." },
-      { path: ["rc", "ep"], text: "Completions carry the data across the link.", t: "The link carries at most 500 MB/s; the DMA reaches 371 MB/s" },
-      { path: ["ep", "sc"], text: "The endpoint writes the data into the interconnect, which widens it from 64 to 512 bits and moves it to the memory clock." },
-      { path: ["sc", "mig"], text: "The memory controller schedules the writes." },
-      { path: ["mig", "ddr"], text: "The data lands in DDR3. The engine signals completion with an interrupt." },
+      { path: ["cpu", "dram"], text: "The runtime writes a 64-byte command into the next slot of the submission queue, in the uncached DMA arena, and makes sure the write has landed (dsb st)." },
+      { path: ["cpu", "rc"], text: "One store to the SQ_TAIL doorbell in BAR0 becomes a posted PCIe write: the CPU does not wait for it." },
+      { path: ["rc", "ep"], text: "The write crosses the link to the bridge." },
+      { path: ["ep", "regs"], text: "The bridge turns it into an AXI-Lite write; npu_regs passes the new tail to npu_cq." },
+      { path: ["regs", "cq"], text: "npu_cq sees the submission queue is not empty and starts a fetch." },
+      { path: ["cq", "ep"], text: "It reads the 64-byte command as one 8-beat AXI burst; the bridge sends a PCIe Memory Read." },
+      { path: ["rc", "dram"], text: "The root complex reads the slot from DRAM through the IOMMU, and a completion carries the command back.", t: "A full PCIe read round trip: the largest part of the 3.83 µs" },
+      { path: ["ep", "cq"], text: "npu_cq decodes and runs the command. A NOP takes one cycle; copies and GEMMs take longer." },
+      { path: ["cq", "rc"], text: "It writes a 16-byte completion into the completion queue: status, two timestamps, and a phase bit that flips each time round the ring." },
+      { path: ["dram", "cpu"], text: "The CPU, polling that entry, sees the phase bit change, reads the result, and writes CQ_HEAD to free the slot.", t: "Sleeping on the MSI instead: 13.8 µs" },
     ],
   },
   {
-    id: "c2h", name: "DMA: card to host", total: "340 MB/s at 4 MiB, measured, IOMMU on",
+    id: "copy", name: "Copy: host to card", total: "419 MB/s at 8 MiB, card timestamps, measured",
     steps: [
-      { path: ["cpu", "smmu"], text: "The driver maps the destination buffer: 16 pages become one I/O range in the IOMMU." },
-      { path: ["ddr", "mig"], text: "The card's DMA engine reads card memory through the memory controller." },
-      { path: ["mig", "sc"], text: "The interconnect narrows the data to the endpoint's 64-bit bus." },
-      { path: ["sc", "ep"], text: "The endpoint packs the data into Memory Write requests." },
-      { path: ["ep", "rc"], text: "The writes cross the link to the root complex.", t: "340 MB/s measured at 4 MiB" },
-      { path: ["rc", "smmu"], text: "The root complex translates each address through the IOMMU." },
-      { path: ["smmu", "dram"], text: "The data lands in DRAM, bypassing the CPU's caches." },
-      { path: ["dram", "cpu"], text: "The driver must invalidate the CPU's cached copies of every page before the program reads them. AMD's driver did it for the first page only; this project's patch fixes it.", t: "Found on this bench; upstream issue #386" },
+      { path: ["cpu", "dram"], text: "The data is already in the DMA arena; the CPU writes one COPY_H2C command (length, host bus address, card address) and rings the doorbell." },
+      { path: ["cq", "ep"], text: "npu_cq fetches the command, then issues 2 KiB reads of the source, up to four in flight." },
+      { path: ["ep", "rc"], text: "The bridge turns them into PCIe Memory Reads." },
+      { path: ["smmu", "dram"], text: "The IOMMU translates each address into the arena's physical pages." },
+      { path: ["rc", "ep"], text: "Completions carry the data back across the link.", t: "Gen2 ×1 carries at most 500 MB/s; the copy reaches 419" },
+      { path: ["ep", "cq"], text: "The data streams into an 8 KiB FIFO; as soon as a burst's worth is in, npu_cq writes it out." },
+      { path: ["cq", "sc"], text: "The interconnect widens it from 64 to 512 bits and moves it to the memory clock." },
+      { path: ["mig", "ddr"], text: "The data lands in DDR3; npu_cq writes the completion." },
+    ],
+  },
+  {
+    id: "gemm", name: "GEMM inside the card", total: "64 multiply-accumulates per clock at 125 MHz, from card memory",
+    steps: [
+      { path: ["cpu", "rc"], text: "The host submits a GEMM command: M, K, N, four card addresses (A, weights, bias, C) and the scale. Nothing else crosses the link." },
+      { path: ["ep", "cq"], text: "npu_cq fetches it and hands it to npu_mm, which takes over the card port." },
+      { path: ["npu", "sc"], text: "npu_mm reads the bias, then 8 rows of A into block RAM." },
+      { path: ["sc", "npu"], text: "It streams all the weights past those 8 rows: every 8-byte beat meets 8 bytes of each row, 64 products per clock.", t: "Weights read once per 8 rows, not once per row" },
+      { path: ["npu", "sc"], text: "Each finished column of 8 sums is scaled, rounded and clamped, and the 8 rows of C are written back; then the next 8 rows." },
+      { path: ["cq", "rc"], text: "When all rows are done, npu_cq writes the completion with the card's start and end timestamps." },
     ],
   },
   {
@@ -284,7 +303,7 @@ for (const f of FLOWS) {
 }
 playBtn.addEventListener("click", play);
 stepBtn.addEventListener("click", () => { playing = false; playBtn.textContent = "Play"; setStep((stepIdx + 1) % current.steps.length, true); });
-// Deep links: ?flow=c2h&step=8 opens a journey at a step.
+// Deep links: ?flow=cmd&step=7 opens a journey at a step.
 {
   const q = new URLSearchParams(location.search);
   const f = FLOWS.find((x) => x.id === q.get("flow")) || FLOWS[0];
@@ -364,6 +383,33 @@ function bandwidthChart() {
   card.querySelector(".table-view").innerHTML = `<table><tr><th>Path</th><th>Measured</th><th>Limit</th><th>Share</th><th>Limit from</th></tr>${bandwidth.map((d) => `<tr><td>${d.label}</td><td class="num">${fmtMBs(d.mbs)}</td><td class="num">${fmtMBs(d.limit)}</td><td class="num">${Math.round((100 * d.mbs) / d.limit)} %</td><td>${d.limitNote}</td></tr>`).join("")}</table>`;
 }
 
+function mnistChart() {
+  const card = document.getElementById("chart-mnist"), box = card.querySelector(".chart");
+  const rows = mnist.throughput;
+  const W = 1100, rowH = 58, top = 10, left = 250, right = 150, H = top + rows.length * rowH + 34;
+  const max = 60000;
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "MNIST images per second: card 0.5.0, one Cortex-A55 core, card 0.4.0" }, box);
+  const x = (v) => left + (v / max) * (W - left - right);
+  const grid = el("g", { class: "grid" }, svg), axis = el("g", { class: "axis" }, svg);
+  for (let v = 0; v <= max; v += 10000) {
+    el("line", { x1: x(v), x2: x(v), y1: top, y2: H - 28 }, grid);
+    el("text", { x: x(v), y: H - 8, "text-anchor": "middle" }, axis).textContent = v === 0 ? "0" : `${v / 1000}k`;
+  }
+  const tip = tooltipFor(box);
+  rows.forEach((d, i) => {
+    const y = top + i * rowH + 12;
+    el("text", { class: "bar-label", x: left - 16, y: y + 15, "text-anchor": "end" }, svg).textContent = d.label;
+    el("rect", { x: x(0), y: y + 2, width: Math.max(4, x(d.ips) - x(0)), height: 18, rx: 4, fill: "var(--s1)" }, svg);
+    el("text", { class: "bar-value", x: x(d.ips) + 10, y: y + 16 }, svg).textContent = `${d.ips.toLocaleString("en-US")} images/s`;
+    el("text", { class: "bar-sub", x: x(0), y: y + 38 }, svg).textContent = `${(d.mmacs / 1000).toFixed(2)} GMAC/s · ${d.note}`;
+    const hit = el("rect", { class: "hit", x: 0, y: y - 8, width: W, height: rowH }, svg);
+    hit.addEventListener("mousemove", (e) => { const [px, py] = localXY(box, e);
+      tip.show(px, py, `<div>${d.label}</div><div class="tv">${d.ips.toLocaleString("en-US")} images/s</div><div class="tn">${d.mmacs.toLocaleString("en-US")} MMAC/s · ${d.note} · measured</div>`); });
+    hit.addEventListener("mouseleave", tip.hide);
+  });
+  card.querySelector(".table-view").innerHTML = `<table><tr><th>Runs on</th><th>Images/s</th><th>MMAC/s</th><th>Note</th></tr>${rows.map((d) => `<tr><td>${d.label}</td><td class="num">${d.ips.toLocaleString("en-US")}</td><td class="num">${d.mmacs.toLocaleString("en-US")}</td><td>${d.note}</td></tr>`).join("")}</table>`;
+}
+
 function sizeChart() {
   const card = document.getElementById("chart-size"), box = card.querySelector(".chart");
   const colors = { h2c: "var(--s1)", c2h: "var(--s2)" };
@@ -402,7 +448,7 @@ function sizeChart() {
   hit.addEventListener("mouseleave", () => { tip.hide(); cross.setAttribute("opacity", 0); });
   card.querySelector(".table-view").innerHTML = `<table><tr><th>Transfer</th>${dmaBySize.series.map((s) => `<th>${s.name}</th>`).join("")}</tr>${dmaBySize.sizes.map((sz, i) => `<tr><td>${fmtSize(sz)}</td>${dmaBySize.series.map((s) => `<td class="num">${fmtMBs(s.values[i])}</td>`).join("")}</tr>`).join("")}</table>`;
 }
-timeChart(); bandwidthChart(); sizeChart();
+mnistChart(); timeChart(); bandwidthChart(); sizeChart();
 for (const btn of document.querySelectorAll(".toggle")) {
   btn.addEventListener("click", () => {
     const card = document.getElementById(btn.dataset.target);
@@ -440,6 +486,14 @@ const BUGS = [
     fix: "Write data now goes out with its address. The new test deadlocks on the old code and passes on the fixed one.",
     link: doc("hw/rtl/mem_bw.v"),
   },
+  {
+    where: "Card · npu_mm", title: "The widest GEMM wrote nothing",
+    symptom: "On the card, every output of a 7 × 2048 · 2048 × 1024 product was wrong, in INT8 and INT32; the 832 × 128 products of the MNIST network were exact.",
+    tool: "npu-test, which checks every output against the CPU. All wrong and in both formats pointed at the write side, not the arithmetic.",
+    cause: "The output row's size came from bits 9 to 0 of N. N = 1024 is bit 10 alone, so the engine computed every value and wrote none of them. The testbench never went past N = 128.",
+    fix: "Sizes from all 11 bits. The testbench now runs K = 2048, N = 1024 and fails on the old code.",
+    link: doc("hw/rtl/npu_mm.v"),
+  },
 ];
 document.getElementById("bugs").append(...BUGS.map((b) => html(`
   <article class="bug"><div class="where">${b.where}</div><h3>${b.title}</h3>
@@ -451,7 +505,7 @@ document.getElementById("bugs").append(...BUGS.map((b) => html(`
 const CMP = [
   { name: "Hailo-8", tag: "Weights on chip, layers laid out in space", rows: [["Weights", "On-chip memory, no external DRAM"], ["Execution", "Dataflow pipeline across the die"], ["Host link", "PCIe Gen3 ×2 or ×4 (M.2)"], ["Strength", "Predictable latency for models that fit"]] },
   { name: "Ara-2", tag: "Weights in DRAM, a programmable engine", rows: [["Weights", "16 GB module memory (ARA2-M2-16G-GT)"], ["Execution", "Engine streams weights from DRAM"], ["Host link", "PCIe Gen4 ×4 or USB 3.2"], ["Rated", "Up to 40 TOPS"]] },
-  { name: "This card", tag: "Artix-7 on the bench, both roles at small scale", ours: true, rows: [["Weights", "1 GiB DDR3 at 5.9 GB/s, or block RAM"], ["Execution", "Phase 4: INT8 engine on 740 DSP slices"], ["Host link", "PCIe Gen2 ×1, 371 MB/s measured"], ["Strength", "Every step open and measurable"]] },
+  { name: "This card", tag: "Artix-7 on the bench, both roles at small scale", ours: true, rows: [["Weights", "1 GiB DDR3 at 5.9 GB/s, or block RAM"], ["Execution", "INT8 GEMM, 64 MACs per clock from DDR3"], ["Host link", "PCIe Gen2 ×1, 419 MB/s measured"], ["Strength", "Every step open and measurable"]] },
 ];
 document.getElementById("compare-cards").append(...CMP.map((c) => html(`
   <div class="cmp${c.ours ? " ours" : ""}"><h3>${c.name}</h3><p class="tagline">${c.tag}</p>
@@ -462,8 +516,8 @@ document.getElementById("compare-cards").append(...CMP.map((c) => html(`
 const PHASES = [
   ["PCIe link", "Endpoint, registers, DMA, interrupt, flash boot", "done"],
   ["Card memory", "1 GiB DDR3, debug cores, card-side bandwidth", "done"],
-  ["Command queue", "Own DMA engine, rings in host memory, own driver", "current"],
-  ["Compute engine", "INT8 matrix engine, bit-exact Python model", "next"],
+  ["Command queue", "Own DMA engine, rings in host memory, own driver", "done"],
+  ["Compute engine", "INT8 matrix engine, bit-exact model, MNIST on the card", "current"],
   ["Compiler", "Quantized model to a card program, runtime", "next"],
   ["Comparison", "Cortex-A55 vs i.MX95 NPU vs this card", "next"],
 ];
