@@ -114,8 +114,11 @@ void npu_close(struct npu *n) {
   if (n->fd >= 0) close(n->fd);
 }
 
+// The caller checks for room before building the command (sq_full), so a
+// full queue does not use up a command ID.
+static int sq_full(struct npu *n) { return n->in_flight >= n->entries - 1; }
+
 static int submit(struct npu *n, const uint64_t w[4]) {
-  if (n->in_flight >= n->entries - 1) return -1;
   volatile uint64_t *slot = (volatile uint64_t *)(n->sq + n->sq_tail * 64);
   for (int i = 0; i < 8; i++) slot[i] = i < 4 ? w[i] : 0;
   n->sq_tail = (n->sq_tail + 1) & (n->entries - 1);
@@ -129,16 +132,19 @@ static uint64_t word0(struct npu *n, uint8_t op, uint8_t flags, uint32_t hi) {
 }
 
 int npu_submit_nop(struct npu *n, uint8_t flags) {
+  if (sq_full(n)) return -1;
   uint64_t w[4] = { word0(n, NPU_OP_NOP, flags, 0), 0, 0, 0 };
   return submit(n, w);
 }
 
 int npu_submit_copy(struct npu *n, uint8_t op, uint8_t flags, uint32_t len, uint64_t host_bus, uint32_t card) {
+  if (sq_full(n)) return -1;
   uint64_t w[4] = { word0(n, op, flags, len), host_bus, card, 0 };
   return submit(n, w);
 }
 
 int npu_submit_gemm(struct npu *n, uint8_t flags, const struct npu_gemm *g) {
+  if (sq_full(n)) return -1;
   uint64_t w[4] = {
     word0(n, NPU_OP_GEMM, flags, g->m),
     (uint64_t)g->a | (uint64_t)g->bt << 32,

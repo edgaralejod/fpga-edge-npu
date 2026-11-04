@@ -302,40 +302,42 @@ module npu_cq (
   // Mover: streams a copy through a FIFO.
   localparam integer FIFO_LOG2 = 10;          // 1024 beats, 8 KiB
   localparam [31:0]  FIFO_BEATS = 32'd1024;
-  localparam [31:0]  BURST = 32'd256;         // 2 KiB of 64-bit beats
 
   reg        mv_run;
-  reg [31:0] mv_src, mv_dst, mv_total;        // AXI addresses, total beats
-  reg [31:0] rd_issued, wr_issued, popped;    // beats
+  reg [31:0] rd_left, wr_left;                // beats still to read, to write
+  reg [10:0] reserved;                        // FIFO beats read or requested, not yet written
+  reg        ar_v;                            // read request held until accepted
+  reg [31:0] ar_addr, aw_base;
+  reg [8:0]  ar_len;
   reg [31:0] b_need, b_got;                   // write bursts
   reg        ws_busy, ws_aw_ok;
   reg [8:0]  ws_left;                         // beats left in the current write burst
   reg [8:0]  ws_len;
   reg        mv_err_r;
 
-  wire [31:0] rd_left   = mv_total - rd_issued;
-  wire [31:0] rd_len    = (rd_left < BURST) ? rd_left : BURST;
-  wire [31:0] in_flight = rd_issued - popped;           // beats reserved in the FIFO
-  wire        rd_can    = mv_run && (rd_issued < mv_total) && (in_flight + rd_len <= FIFO_BEATS);
+  // Everything that decides a request is registered: a read request is
+  // raised one cycle after it is decided and held, address and length
+  // fixed, until accepted (125 MHz timing; one idle cycle per 2 KiB burst).
+  wire [8:0]  rd_len    = (rd_left[31:8] == 0) ? rd_left[8:0] : 9'd256;
+  wire        rd_can    = mv_run && !ar_v && (rd_left != 0) && ({1'b0, reserved} + {3'd0, rd_len} <= FIFO_BEATS[11:0]);
 
-  wire [31:0] wr_left   = mv_total - wr_issued;
-  wire [31:0] wr_len    = (wr_left < BURST) ? wr_left : BURST;
+  wire [8:0]  wr_len    = (wr_left[31:8] == 0) ? wr_left[8:0] : 9'd256;
   wire [FIFO_LOG2:0] f_count;
   wire        f_valid;
   wire [63:0] f_dout;
-  wire        wr_can    = mv_run && !ws_busy && (wr_issued < mv_total) && ({21'd0, f_count} >= wr_len);
+  wire        wr_can    = mv_run && !ws_busy && (wr_left != 0) && ({2'd0, f_count} >= {3'd0, wr_len});
 
   // Generic mover channels, routed to the host or card port by mv_dir.
-  wire        m_arvalid = rd_can;
-  wire [31:0] m_araddr  = mv_src + {rd_issued[28:0], 3'd0};
-  wire [7:0]  m_arlen   = rd_len[7:0] - 8'd1;
+  wire        m_arvalid = ar_v;
+  wire [31:0] m_araddr  = ar_addr;
+  wire [7:0]  m_arlen   = ar_len[7:0] - 8'd1;
   wire        m_arready = mv_dir ? c_arready : h_arready;
   wire        m_rvalid  = mv_dir ? c_rvalid : h_rvalid;
   wire [63:0] m_rdata   = mv_dir ? c_rdata : h_rdata;
   wire [1:0]  m_rresp   = mv_dir ? c_rresp : h_rresp;
 
   wire        m_awvalid = ws_busy && !ws_aw_ok;
-  wire [31:0] m_awaddr  = mv_dst + {wr_issued[28:0], 3'd0} - {20'd0, ws_len, 3'd0};
+  wire [31:0] m_awaddr  = aw_base;
   wire [7:0]  m_awlen   = ws_len[7:0] - 8'd1;
   wire        m_awready = mv_dir ? h_awready : c_awready;
   wire        m_wvalid  = ws_busy && (ws_left != 0) && f_valid;
@@ -358,19 +360,30 @@ module npu_cq (
 
   always @(posedge clk) begin
     if (!rst_n) begin
-      mv_run <= 1'b0; mv_src <= 0; mv_dst <= 0; mv_total <= 0;
-      rd_issued <= 0; wr_issued <= 0; popped <= 0; b_need <= 0; b_got <= 0;
+      mv_run <= 1'b0;
+      rd_left <= 0; wr_left <= 0; reserved <= 0; ar_v <= 1'b0; ar_addr <= 0; ar_len <= 0; aw_base <= 0;
+      b_need <= 0; b_got <= 0;
       ws_busy <= 1'b0; ws_aw_ok <= 1'b0; ws_left <= 0; ws_len <= 0; mv_err_r <= 1'b0;
     end else if (mv_start) begin
       mv_run    <= 1'b1;
-      mv_src    <= mv_dir ? caddr[31:0] : host_axi(haddr[31:0]);
-      mv_dst    <= mv_dir ? host_axi(haddr[31:0]) : caddr[31:0];
-      mv_total  <= {3'd0, length[31:3]};
       b_need    <= (length + 32'd2047) >> 11;
-      rd_issued <= 0; wr_issued <= 0; popped <= 0; b_got <= 0;
+      rd_left   <= {3'd0, length[31:3]};
+      wr_left   <= {3'd0, length[31:3]};
+      ar_addr   <= mv_dir ? caddr[31:0] : host_axi(haddr[31:0]);
+      aw_base   <= mv_dir ? host_axi(haddr[31:0]) : caddr[31:0];
+      reserved <= 0; ar_v <= 1'b0; b_got <= 0;
       ws_busy <= 1'b0; ws_aw_ok <= 1'b0; ws_left <= 0; mv_err_r <= 1'b0;
     end else if (mv_run) begin
-      if (m_arvalid && m_arready) rd_issued <= rd_issued + rd_len;
+      // Read requests
+      if (ar_v && m_arready) begin
+        ar_v    <= 1'b0;
+        ar_addr <= ar_addr + {20'd0, ar_len, 3'd0};
+      end else if (rd_can) begin
+        ar_v    <= 1'b1;
+        ar_len  <= rd_len;
+        rd_left <= rd_left - {23'd0, rd_len};
+      end
+      reserved <= reserved + (rd_can ? {2'd0, rd_len} : 11'd0) - {10'd0, w_fire};
       if (r_fire && m_rresp != 2'b00) mv_err_r <= 1'b1;
 
       // Write bursts: address and data presented together once the
@@ -378,15 +391,15 @@ module npu_cq (
       if (wr_can) begin
         ws_busy   <= 1'b1;
         ws_aw_ok  <= 1'b0;
-        ws_len    <= wr_len[8:0];
-        ws_left   <= wr_len[8:0];
-        wr_issued <= wr_issued + wr_len;
+        ws_len    <= wr_len;
+        ws_left   <= wr_len;
+        wr_left   <= wr_left - {23'd0, wr_len};
       end else if (ws_busy) begin
-        if (m_awvalid && m_awready) ws_aw_ok <= 1'b1;
-        if (w_fire) begin
-          ws_left <= ws_left - 9'd1;
-          popped  <= popped + 32'd1;
+        if (m_awvalid && m_awready) begin
+          ws_aw_ok <= 1'b1;
+          aw_base  <= aw_base + {20'd0, ws_len, 3'd0};
         end
+        if (w_fire) ws_left <= ws_left - 9'd1;
         if ((ws_aw_ok || (m_awvalid && m_awready)) &&
             (ws_left == 0 || (ws_left == 9'd1 && w_fire)))
           ws_busy <= 1'b0;
@@ -397,7 +410,7 @@ module npu_cq (
         if (m_bresp != 2'b00) mv_err_r <= 1'b1;
       end
 
-      if (b_got == b_need && wr_issued == mv_total && !ws_busy) mv_run <= 1'b0;
+      if (b_got == b_need && wr_left == 0 && !ws_busy) mv_run <= 1'b0;
     end
   end
 

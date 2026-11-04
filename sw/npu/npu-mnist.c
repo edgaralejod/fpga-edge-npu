@@ -133,6 +133,7 @@ int main(int argc, char **argv) {
   struct npu_gemm s1 = l1, s2 = l2;
   s1.m = 1; s2.m = 1;
   long single_bad = 0;
+  double tr_host[3] = {0}; struct npu_cpl tr_cpl[4]; int tr_label = 0, tr_pred = 0;
   for (int r = 0; r < runs; r++) {
     uint32_t i = r % count;
     double ts = npu_now();                                  // upload the image, as an application would
@@ -143,10 +144,15 @@ int main(int argc, char **argv) {
     npu_submit_gemm(&N, 0, &s1);
     npu_submit_gemm(&N, 0, &s2);
     npu_submit_copy(&N, NPU_OP_COPY_C2H, 0, n2 * 4, blog, clog);
+    double tring = npu_now();
     npu_ring(&N);
     for (int t = 0; t < 4; t++) if (npu_wait(&N, &e[t], 0, 5.0)) return 1;
     int p = argmax10(alog);
     lat[r] = (npu_now() - ts) * 1e6;
+    if (r == runs - 1) {                                    // keep one run as a trace
+      tr_host[0] = 0; tr_host[1] = (tring - ts) * 1e6; tr_host[2] = lat[r];
+      memcpy(tr_cpl, e, sizeof(e)); tr_label = lab[8 + i]; tr_pred = p;
+    }
     card_us[r] = (uint32_t)(e[3].t_done - e[0].t_fetch) * sec * 1e6;
     single_bad += p != argmax10(ref + (size_t)i * n2);
   }
@@ -154,6 +160,16 @@ int main(int argc, char **argv) {
   qsort(card_us, runs, sizeof(double), cmp_d);
   printf("latency   one image (upload, 2 layers, download, argmax), %d runs: median %.1f us, p99 %.1f us on the host; "
          "%.1f us on the card; %ld predictions differing from the CPU\n", runs, lat[runs / 2], lat[runs * 99 / 100], card_us[runs / 2], single_bad);
+  // One inference as a trace, for the website: host times in microseconds
+  // from the start of the run; card times in microseconds from the first
+  // command's fetch (the two clocks are not related).
+  printf("TRACE {\"image\":%u,\"label\":%d,\"pred\":%d,\"host_us\":{\"prepare\":%.2f,\"doorbell\":%.2f,\"done\":%.2f},\"card_us\":[",
+         (runs - 1) % count, tr_label, tr_pred, tr_host[0], tr_host[1], tr_host[2]);
+  const char *names[4] = { "COPY_H2C image", "GEMM layer 1", "GEMM layer 2", "COPY_C2H logits" };
+  for (int t = 0; t < 4; t++)
+    printf("%s{\"cmd\":\"%s\",\"fetch\":%.3f,\"done\":%.3f}", t ? "," : "", names[t],
+           (uint32_t)(tr_cpl[t].t_fetch - tr_cpl[0].t_fetch) * sec * 1e6, (uint32_t)(tr_cpl[t].t_done - tr_cpl[0].t_fetch) * sec * 1e6);
+  printf("]}\n");
   int ok = mism == 0 && exp_diff == 0 && single_bad == 0;
   printf("mnist     %s\n", ok ? "PASS" : "FAIL");
   npu_close(&N);

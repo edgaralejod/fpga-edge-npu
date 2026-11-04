@@ -1,0 +1,24 @@
+# systemd unit for the FRDM-i.MX95: load fpga_npu.ko for the card at every
+# boot. Replaces npu-card.service (the XDMA driver), which only applies to
+# cards running a 0.3.x bitstream.
+#
+# Install on the i.MX95, with the module in /root/npu:
+#   cp fpga-npu.service /etc/systemd/system/
+#   systemctl disable --now npu-card.service     # if installed
+#   systemctl daemon-reload && systemctl enable --now fpga-npu.service
+#
+# The module binds to 10ee:ed10. If the card is absent (the AC701 was powered
+# after the i.MX95), it loads and waits; /dev/fpga-npu appears after a rescan:
+#   echo 1 > /sys/bus/pci/rescan
+
+[Unit]
+Description=fpga-edge-npu: fpga_npu driver for the AC701 card
+After=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'lsmod | grep -q "^fpga_npu " || insmod /root/npu/fpga_npu.ko'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

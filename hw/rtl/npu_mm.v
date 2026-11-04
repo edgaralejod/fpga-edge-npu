@@ -114,17 +114,18 @@ module npu_mm (
   // Addresses and data are counted separately: every burst's address goes out
   // in order and holds until accepted; a burst's data may flow while its
   // address is presented or after, never before.
-  reg  [8:0]  w_idx;           // word of the C row being sent
-  reg  [8:0]  w_total;         // words in the C row (a multiple of 8)
-  reg  [5:0]  aw_b;            // write bursts whose address was accepted
+  reg  [9:0]  w_idx;           // word of the C row being sent
+  reg  [9:0]  w_total;         // words in the C row (a multiple of 8, up to 512)
+  reg  [6:0]  aw_b;            // write bursts whose address was accepted
   reg         w_primed;
   reg  [31:0] b_need, b_got;
   reg  [63:0] ob_q;
-  wire [5:0]  n_bursts = w_total[8:3];
-  wire [5:0]  w_b      = w_idx[8:3];
-  wire [8:0]  ob_addr  = (wvalid && wready) ? w_idx + 9'd1 : w_idx;
+  wire [6:0]  n_bursts = w_total[9:3];
+  wire [6:0]  w_b      = w_idx[9:3];
+  wire [9:0]  ob_next  = (wvalid && wready) ? w_idx + 10'd1 : w_idx;
+  wire [8:0]  ob_addr  = ob_next[8:0];
   assign awvalid = (st == ST_C) && (aw_b < n_bursts);
-  assign awaddr  = c_row + {20'd0, aw_b, 6'd0};
+  assign awaddr  = c_row + {19'd0, aw_b, 6'd0};
   assign awlen   = 8'd7;
   assign wvalid  = (st == ST_C) && w_primed && (w_idx < w_total) && (w_b <= aw_b);
   assign wdata   = ob_q;
@@ -262,15 +263,16 @@ module npu_mm (
         ST_DRAIN:
           if (!pipe_busy) begin
             w_idx <= 0; w_primed <= 1'b0; aw_b <= 0;
-            w_total <= rout32 ? rn[9:1] : {3'd0, rn[9:3]};
-            b_need <= b_need + (rout32 ? {26'd0, rn[9:4]} : {28'd0, rn[9:6]});   // 64-byte bursts
+            // N is up to 1024: 11 bits (rn[9:0] alone is 0 for N = 1024)
+            w_total <= rout32 ? rn[10:1] : {2'd0, rn[10:3]};
+            b_need <= b_need + (rout32 ? {25'd0, rn[10:4]} : {27'd0, rn[10:6]});   // 64-byte bursts
             st <= ST_C;
           end
 
         ST_C: begin
           w_primed <= 1'b1;                       // ob_q holds word 0 after one cycle
-          if (awvalid && awready) aw_b <= aw_b + 6'd1;
-          if (wvalid && wready) w_idx <= w_idx + 9'd1;
+          if (awvalid && awready) aw_b <= aw_b + 7'd1;
+          if (wvalid && wready) w_idx <= w_idx + 10'd1;
           if (w_idx == w_total && aw_b == n_bursts) st <= ST_CB;
         end
 
