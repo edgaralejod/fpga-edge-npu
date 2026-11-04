@@ -6,7 +6,7 @@ The reference pair is an AMD **AC701** (Artix-7 200T) as the card and an NXP **F
 
 **Status: phase 2, card memory.** The card now has 1 GiB of DDR3: on the FRDM-i.MX95 it enumerates at PCIe Gen2 x1, DMA reaches about 370 MB/s host to card and 330 MB/s card to host, and the whole 1 GiB passes a write-then-verify test. Phase 1 (registers, DMA, interrupt) passed on 2026-11-04. Still open in phase 2: measuring the DDR3's bandwidth from inside the FPGA. [Bring-up](docs/bringup.md) has the measurements and the problems found on the way, including an i.MX95 IOMMU issue that needs a workaround; [debugging](docs/debugging.md) covers the ILAs, VIO and JTAG tests built into the card. There is no inference engine yet; the [roadmap](ROADMAP.md) says what comes next and when each step counts as done.
 
-Created by **Edgar Duarte**. Published by **Virtu Services LLC**. Engineering consulting through **[Virtu Services](https://virtu-services.us)**. Apache-2.0 licensed.
+Created by **Edgar Duarte**. Apache-2.0 licensed.
 
 [Architecture](ARCHITECTURE.md) · [Roadmap](ROADMAP.md) · [How edge-AI cards work](docs/edge-ai-accelerators.md) · [Hardware setup](docs/hardware-setup.md) · [Bring-up](docs/bringup.md) · [Debugging](docs/debugging.md) · [Register map](docs/register-map.md) · [Contribute](CONTRIBUTING.md)
 
@@ -70,3 +70,7 @@ The repository holds only source and settings. AMD IP (XDMA, and the MIG, SmartC
 ## Limits
 
 This is a learning and portfolio project, not a product. It is not certified for any use, and it is not affiliated with AMD, NXP, Hailo or Kinara; their product names describe what this project compares itself with. Performance figures in these docs are labelled as measured, estimated, or from vendor documents. The DMA path currently needs the i.MX95's IOMMU in pass-through mode for the card, which removes the IOMMU's protection against a misbehaving device.
+
+---
+
+<sub>Published by Virtu Services LLC ([virtu-services.us](https://virtu-services.us)).</sub>
