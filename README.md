@@ -8,7 +8,7 @@ The reference pair is an AMD **AC701** (Artix-7 200T) as the card and an NXP **F
 
 Created by **Edgar Duarte**. Apache-2.0 licensed.
 
-[Architecture](ARCHITECTURE.md) · [Roadmap](ROADMAP.md) · [How edge-AI cards work](docs/edge-ai-accelerators.md) · [Hardware setup](docs/hardware-setup.md) · [Bring-up](docs/bringup.md) · [Debugging](docs/debugging.md) · [Register map](docs/register-map.md) · [Command queue (design)](docs/command-queue.md) · [Contribute](CONTRIBUTING.md)
+**[Interactive explainer](https://edgaralejod.github.io/fpga-edge-npu/)** · [Architecture](ARCHITECTURE.md) · [Roadmap](ROADMAP.md) · [How edge-AI cards work](docs/edge-ai-accelerators.md) · [Hardware setup](docs/hardware-setup.md) · [Bring-up](docs/bringup.md) · [Debugging](docs/debugging.md) · [Register map](docs/register-map.md) · [Command queue (design)](docs/command-queue.md) · [Contribute](CONTRIBUTING.md)
 
 ![The FRDM-i.MX95 on the left, joined by a flat riser cable to the PCIe edge connector of the AC701 on the right](docs/images/bench-setup.jpg)
 
@@ -65,7 +65,7 @@ Then follow [hardware setup](docs/hardware-setup.md) to connect the boards and [
 | `sw/scripts/` | `imx95-load-xdma.sh` loads the XDMA driver on the FRDM-i.MX95; `npu-card.service` runs it at boot. |
 | `sw/patches/` | `xdma-unmap-orig-nents.patch`: fixes AMD's XDMA driver for hosts with an IOMMU (see [bring-up](docs/bringup.md)). |
 | `docs/` | Background, hardware setup, bring-up, debugging, register map. |
-| `site/` | The explainer website (Firebase Hosting): interactive system map, animated data flows, measured numbers. |
+| `site/` | The [explainer website](https://edgaralejod.github.io/fpga-edge-npu/) (GitHub Pages, `make site-publish`): interactive system map, animated data flows, measured numbers. |
 
 The repository holds only source and settings. AMD IP (XDMA, and the MIG, SmartConnect and debug cores in the block design) is generated at build time from `hw/scripts/ip.tcl` and `hw/bd/card_mem.tcl`, never committed.
 
