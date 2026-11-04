@@ -9,6 +9,7 @@
 //   NOP       completes at once (measures the queue's own overhead)
 //   COPY_H2C  host memory -> card memory
 //   COPY_C2H  card memory -> host memory
+//   GEMM      INT8 matrix multiply in card memory (npu_mm)
 //
 // Copies stream through a FIFO: up to four 2 KiB reads in flight, writes
 // issued a burst at a time once the burst's data is in the FIFO. Host and
@@ -79,7 +80,7 @@ module npu_cq (
   input  wire        c_rvalid,  output wire       c_rready
 );
 
-  localparam [7:0] OP_NOP = 8'h00, OP_COPY_H2C = 8'h01, OP_COPY_C2H = 8'h02;
+  localparam [7:0] OP_NOP = 8'h00, OP_COPY_H2C = 8'h01, OP_COPY_C2H = 8'h02, OP_GEMM = 8'h10;
   localparam [7:0] ST_OK = 8'd0, ST_BAD_OPCODE = 8'd1, ST_BAD_LENGTH = 8'd2, ST_AXI_ERROR = 8'd3;
 
   localparam [31:0] WINDOW = 32'h8000_0000;   // AXI address of host bus address 0
@@ -104,11 +105,11 @@ module npu_cq (
 
   // ---------------------------------------------------------------------------
   // Controller
-  localparam [2:0] S_IDLE = 3'd0, S_FETCH_AR = 3'd1, S_FETCH_R = 3'd2, S_EXEC = 3'd3,
-                   S_MOVE = 3'd4, S_CQ_WAIT = 3'd5, S_CPL = 3'd6, S_CPL_B = 3'd7;
-  reg [2:0]  state;
+  localparam [3:0] S_IDLE = 4'd0, S_FETCH_AR = 4'd1, S_FETCH_R = 4'd2, S_EXEC = 4'd3,
+                   S_MOVE = 4'd4, S_CQ_WAIT = 4'd5, S_CPL = 4'd6, S_CPL_B = 4'd7, S_GEMM = 4'd8;
+  reg [3:0]  state;
   reg [2:0]  fbeat;            // command beat being received
-  reg [63:0] cmd0, cmd1, cmd2; // opcode/flags/cid/length, host address, card address
+  reg [63:0] cmd0, cmd1, cmd2, cmd3; // see docs/command-queue.md for each opcode's layout
   reg        fetch_err;
   reg [7:0]  status;
   reg [31:0] t_fetch, t_done;
@@ -129,28 +130,46 @@ module npu_cq (
                  ({1'b0, haddr[31:0]} + {1'b0, length} <= HOST_LIMIT) &&
                  ({1'b0, caddr[31:0]} + {1'b0, length} <= CARD_LIMIT);
 
+  // GEMM: word0 [63:32] M; word1 A, Bt; word2 C, bias; word3 [15:0] K,
+  // [31:16] N, [36:32] shift, [40] relu, [41] out32, [63:48] mult.
+  wire [31:0] g_m = cmd0[63:32];
+  wire [15:0] g_k = cmd3[15:0], g_n = cmd3[31:16];
+  wire        g_out32 = cmd3[41];
+  wire [63:0] g_a_end = {32'd0, cmd1[31:0]}  + {32'd0, g_m} * {48'd0, g_k};
+  wire [63:0] g_b_end = {32'd0, cmd1[63:32]} + {48'd0, g_n} * {48'd0, g_k};
+  wire [63:0] g_c_end = {32'd0, cmd2[31:0]}  + {32'd0, g_m} * {48'd0, g_n} * (g_out32 ? 64'd4 : 64'd1);
+  wire [63:0] g_bias_end = {32'd0, cmd2[63:32]} + {48'd0, g_n} * 64'd4;
+  wire gemm_ok = (g_m != 0) && (g_k != 0) && (g_k[5:0] == 0) && (g_k <= 16'd2048) &&
+                 (g_n != 0) && (g_n[5:0] == 0) && (g_n <= 16'd1024) &&
+                 (cmd1[5:0] == 0) && (cmd1[37:32] == 0) && (cmd2[5:0] == 0) && (cmd2[37:32] == 0) &&
+                 (g_a_end <= 64'h4000_0000) && (g_b_end <= 64'h4000_0000) &&
+                 (g_c_end <= 64'h4000_0000) && (g_bias_end <= 64'h4000_0000);
+
   wire cq_full = (((cq_tail + 12'd1) & mask) == cq_head);
 
   assign busy    = (state != S_IDLE);
   assign stalled = (state == S_CQ_WAIT) && cq_full;
 
-  // Mover handshake
+  // Mover and matrix engine handshakes
   reg        mv_start, mv_dir;          // dir 0: H2C, 1: C2H
   wire       mv_done, mv_err;
+  reg        mm_start;
+  wire       mm_done, mm_err;
 
   always @(posedge clk) begin
     if (!rst_n) begin
       state <= S_IDLE; en_d <= 1'b0;
       sq_head <= 0; sq_tail <= 0; cq_tail <= 0; cq_head <= 0; phase <= 1'b1;
-      fbeat <= 0; cmd0 <= 0; cmd1 <= 0; cmd2 <= 0; fetch_err <= 1'b0;
+      fbeat <= 0; cmd0 <= 0; cmd1 <= 0; cmd2 <= 0; cmd3 <= 0; fetch_err <= 1'b0;
       status <= ST_OK; t_fetch <= 0; t_done <= 0;
       cpl_aw_ok <= 1'b0; cpl_wbeat <= 0;
       axi_err <= 1'b0; completed <= 0;
       msi_pending <= 1'b0; msi_wait <= 1'b0; msi_request <= 1'b0;
-      mv_start <= 1'b0; mv_dir <= 1'b0;
+      mv_start <= 1'b0; mv_dir <= 1'b0; mm_start <= 1'b0;
     end else begin
       en_d     <= cfg_enable;
       mv_start <= 1'b0;
+      mm_start <= 1'b0;
 
       // Enabling the queue starts both rings empty, phase 1.
       if (cfg_enable && !en_d) begin
@@ -185,6 +204,7 @@ module npu_cq (
               3'd0: cmd0 <= h_rdata;
               3'd1: cmd1 <= h_rdata;
               3'd2: cmd2 <= h_rdata;
+              3'd3: cmd3 <= h_rdata;
               default: ;
             endcase
             if (h_rresp != 2'b00) fetch_err <= 1'b1;
@@ -207,10 +227,24 @@ module npu_cq (
             end else begin
               status <= ST_BAD_LENGTH; t_done <= cycles; state <= S_CQ_WAIT;
             end
+          end else if (opcode == OP_GEMM) begin
+            if (gemm_ok) begin
+              mm_start <= 1'b1; state <= S_GEMM;
+            end else begin
+              status <= ST_BAD_LENGTH; t_done <= cycles; state <= S_CQ_WAIT;
+            end
           end else begin
             status <= ST_BAD_OPCODE; t_done <= cycles; state <= S_CQ_WAIT;
           end
         end
+
+        S_GEMM:
+          if (mm_done && !mm_start) begin
+            status <= mm_err ? ST_AXI_ERROR : ST_OK;
+            if (mm_err) axi_err <= 1'b1;
+            t_done <= cycles;
+            state  <= S_CQ_WAIT;
+          end
 
         S_MOVE:
           if (mv_done && !mv_start) begin
@@ -383,23 +417,43 @@ module npu_cq (
   assign h_wstrb   = 8'hFF;
   assign h_bready  = completing || mv_h_wr;
 
-  // Card port: the mover's other side.
-  assign c_arvalid = mv_run && mv_dir && m_arvalid;
-  assign c_araddr  = m_araddr;
-  assign c_arlen   = m_arlen;
+  // Matrix engine, on the card port while a GEMM runs.
+  wire        gemm = (state == S_GEMM);
+  wire [31:0] mm_awaddr, mm_araddr;
+  wire [7:0]  mm_awlen, mm_arlen;
+  wire        mm_awvalid, mm_wlast, mm_wvalid, mm_bready, mm_arvalid, mm_rready;
+  wire [63:0] mm_wdata;
+
+  npu_mm mm (
+    .clk (clk), .rst_n (rst_n), .start (mm_start),
+    .a_addr (cmd1[31:0]), .b_addr (cmd1[63:32]), .c_addr (cmd2[31:0]), .bias_addr (cmd2[63:32]),
+    .m_rows (g_m), .k_len (g_k), .n_len (g_n),
+    .shift (cmd3[36:32]), .relu (cmd3[40]), .out32 (g_out32), .mult (cmd3[63:48]),
+    .done (mm_done), .err (mm_err),
+    .awaddr (mm_awaddr), .awlen (mm_awlen), .awvalid (mm_awvalid), .awready (gemm && c_awready),
+    .wdata (mm_wdata), .wlast (mm_wlast), .wvalid (mm_wvalid), .wready (gemm && c_wready),
+    .bresp (c_bresp), .bvalid (gemm && c_bvalid), .bready (mm_bready),
+    .araddr (mm_araddr), .arlen (mm_arlen), .arvalid (mm_arvalid), .arready (gemm && c_arready),
+    .rdata (c_rdata), .rresp (c_rresp), .rvalid (gemm && c_rvalid), .rready (mm_rready)
+  );
+
+  // Card port: the mover's other side, or the matrix engine.
+  assign c_arvalid = gemm ? mm_arvalid : (mv_run && mv_dir && m_arvalid);
+  assign c_araddr  = gemm ? mm_araddr  : m_araddr;
+  assign c_arlen   = gemm ? mm_arlen   : m_arlen;
   assign c_arsize  = 3'd3;
   assign c_arburst = 2'b01;
-  assign c_rready  = mv_run && mv_dir;
-  assign c_awvalid = mv_run && !mv_dir && m_awvalid;
-  assign c_awaddr  = m_awaddr;
-  assign c_awlen   = m_awlen;
+  assign c_rready  = gemm ? mm_rready  : (mv_run && mv_dir);
+  assign c_awvalid = gemm ? mm_awvalid : (mv_run && !mv_dir && m_awvalid);
+  assign c_awaddr  = gemm ? mm_awaddr  : m_awaddr;
+  assign c_awlen   = gemm ? mm_awlen   : m_awlen;
   assign c_awsize  = 3'd3;
   assign c_awburst = 2'b01;
-  assign c_wvalid  = mv_run && !mv_dir && m_wvalid;
-  assign c_wdata   = f_dout;
-  assign c_wlast   = m_wlast;
+  assign c_wvalid  = gemm ? mm_wvalid  : (mv_run && !mv_dir && m_wvalid);
+  assign c_wdata   = gemm ? mm_wdata   : f_dout;
+  assign c_wlast   = gemm ? mm_wlast   : m_wlast;
   assign c_wstrb   = 8'hFF;
-  assign c_bready  = mv_run && !mv_dir;
+  assign c_bready  = gemm ? mm_bready  : (mv_run && !mv_dir);
 
 endmodule
 

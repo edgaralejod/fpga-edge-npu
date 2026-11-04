@@ -1,6 +1,6 @@
 # Command queue (phase 3 design)
 
-Status: the queue engine (`hw/rtl/npu_cq.v`) is written and passes its testbench (`hw/sim/tb_npu_cq.v`); it is not in the bitstream yet, and the driver is not written. This document is the contract between the engine and the project's Linux driver (`fpga-npu`). Change both together.
+Status: the queue engine (`hw/rtl/npu_cq.v`) and the matrix engine behind its `GEMM` command (`hw/rtl/npu_mm.v`) are written and pass their testbench (`hw/sim/tb_npu_cq.v`); they are not in the bitstream yet, and the driver is not written. This document is the contract between the engine and the project's Linux driver (`fpga-npu`). Change both together.
 
 ## Why a queue
 
@@ -69,7 +69,32 @@ Indices count entries and wrap at the ring size.
 | `0x00` | `NOP` | Nothing; completes at once. Measures the queue's own overhead. |
 | `0x01` | `COPY_H2C` | Copy `length` bytes from host memory to card memory. |
 | `0x02` | `COPY_C2H` | Copy `length` bytes from card memory to host memory. |
-| others | | Completed with status `INVALID_OPCODE`. Compute commands come in phase 4. |
+| `0x10` | `GEMM` | INT8 matrix multiply in card memory, by `npu_mm` (below). |
+| others | | Completed with status `INVALID_OPCODE`. |
+
+### `GEMM` (opcode `0x10`)
+
+Computes `C = requant(A · Btᵀ + bias)` entirely in card memory. A is M × K INT8, Bt is the second operand stored transposed (N × K INT8, so both are read along rows), bias is N INT32, all rows packed. `hw/rtl/npu_mm.v` implements it; `sw/npu/npu_ref.py` is the bit-exact Python model, and the two are compared in `hw/sim/tb_npu_cq.v` and `sw/npu/check_gemm.py`.
+
+| Bytes | Field | Meaning |
+| --- | --- | --- |
+| 0 | `opcode` | `0x10` |
+| 1 | `flags` | `[0]` raise an interrupt when it completes |
+| 2–3 | `cid` | Command ID |
+| 4–7 | `M` | Rows of A and C, at least 1 |
+| 8–11 | `a_addr` | A in card memory |
+| 12–15 | `bt_addr` | Bt in card memory |
+| 16–19 | `c_addr` | C in card memory |
+| 20–23 | `bias_addr` | bias in card memory |
+| 24–25 | `K` | Multiple of 64, up to 2048 |
+| 26–27 | `N` | Multiple of 64, up to 1024 |
+| 28 | `shift` | `[4:0]` right shift after scaling |
+| 29 | `mode` | `[0]` ReLU, `[1]` INT32 output (C is M × N INT32, no scaling) |
+| 30–31 | `mult` | Unsigned scale |
+
+For INT8 output, `C[m][n] = clamp(relu?((acc · mult + 2^(shift−1)) >> shift), −128, 127)` with an arithmetic shift (no rounding term when `shift` is 0), where `acc = Σ A[m][k]·Bt[n][k] + bias[n]` in 32 bits. All four addresses are 64-byte aligned, and every region lies inside the 1 GiB of card memory; otherwise the command completes with `BAD_LENGTH` and nothing runs.
+
+The engine loads one row of A into block RAM, streams all of Bt past it at one 64-bit beat (eight multiply-accumulates) per 125 MHz cycle, and writes the row of C: about M × N × K / 8 cycles per command, with B re-read for every row of A. That is enough to run a small network and to measure; reusing B across rows is the obvious next step.
 
 ## Completion (16 bytes, little-endian)
 

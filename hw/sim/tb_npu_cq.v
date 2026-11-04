@@ -12,7 +12,8 @@
 // bits), a full completion ring stalling the engine, COPY_H2C and COPY_C2H
 // round trips (multi-burst and a short last burst) checked byte for byte,
 // invalid opcode and bad length or alignment, AXI errors, MSI requests,
-// timestamps, and slaves that wait for write data before the address. Prints "RESULT: PASS" or "RESULT: FAIL".
+// timestamps, slaves that wait for write data before the address, and GEMM
+// (INT8 with and without ReLU, INT32) against an independent reference. Prints "RESULT: PASS" or "RESULT: FAIL".
 
 `timescale 1ns / 1ps
 `default_nettype none
@@ -157,6 +158,67 @@ module tb_npu_cq;
 
   integer i, c0, msi0;
 
+  // ---------------------------------------------------------------------------
+  // GEMM reference: the same arithmetic as npu_mm and sw/npu/npu_ref.py.
+  function [7:0] cbyte(input integer addr); cbyte = card.mem[addr >> 3][(addr & 7) * 8 +: 8]; endfunction
+  function [31:0] cword(input integer addr); cword = card.mem[addr >> 3][(addr & 4) * 8 +: 32]; endfunction
+  task cset(input integer addr, input [7:0] v); card.mem[addr >> 3][(addr & 7) * 8 +: 8] = v; endtask
+  task cset32(input integer addr, input [31:0] v); card.mem[addr >> 3][(addr & 4) * 8 +: 32] = v; endtask
+
+  // Verilog-2001 functions are static: two calls in one expression share a
+  // return value, so each byte goes through its own temporary.
+  function signed [31:0] ref_acc(input integer a, input integer bt, input integer bias, input integer k, input integer m, input integer n);
+    integer t; reg signed [31:0] s; reg signed [7:0] x, y;
+    begin
+      s = $signed(cword(bias + 4 * n));
+      for (t = 0; t < k; t = t + 1) begin
+        x = cbyte(a + m * k + t);
+        y = cbyte(bt + n * k + t);
+        s = s + x * y;
+      end
+      ref_acc = s;
+    end
+  endfunction
+  function [7:0] ref_q(input signed [31:0] acc, input [15:0] mult, input [4:0] sh, input rl);
+    reg signed [48:0] p;
+    begin
+      p = acc * $signed({1'b0, mult});
+      if (sh != 0) p = (p + (49'sd1 <<< (sh - 1))) >>> sh;
+      if (rl && p < 0) p = 0;
+      if (p > 127) p = 127;
+      if (p < -128) p = -128;
+      ref_q = p[7:0];
+    end
+  endfunction
+
+  // Fills A (M x K) and Bt (N x K) with random INT8, bias with random INT32.
+  task gemm_data(input integer a, input integer bt, input integer bias, input integer m, input integer k, input integer n, input integer seed);
+    integer t, sd; begin
+      sd = seed;
+      for (t = 0; t < m * k; t = t + 1) cset(a + t, $random(sd));
+      for (t = 0; t < n * k; t = t + 1) cset(bt + t, $random(sd));
+      for (t = 0; t < n; t = t + 1) cset32(bias + 4 * t, $random(sd) % 20000);
+    end
+  endtask
+
+  // Submits a GEMM: word0 M; word1 A, Bt; word2 C, bias; word3 K, N, shift, relu, out32, mult.
+  task submit_gemm(input [15:0] cid, input integer m, input integer a, input integer bt, input integer c, input integer bias,
+                   input integer k, input integer n, input [4:0] sh, input rl, input o32, input [15:0] mult);
+    integer base, t;
+    begin
+      base = (cfg_sq_base + sq_tail * 64) >> 3;
+      host.mem[base + 0] = {m[31:0], cid, 8'h00, 8'h10};
+      host.mem[base + 1] = {bt[31:0], a[31:0]};
+      host.mem[base + 2] = {bias[31:0], c[31:0]};
+      host.mem[base + 3] = {mult, 6'd0, o32, rl, 3'd0, sh, n[15:0], k[15:0]};
+      for (t = 4; t < 8; t = t + 1) host.mem[base + t] = 64'd0;
+      sq_tail = (sq_tail + 1) % entries;
+    end
+  endtask
+
+  integer gm, gn, gbad;
+  reg signed [31:0] gacc;
+
   initial begin
     for (i = 0; i < 16384; i = i + 1) begin host.mem[i] = 64'd0; card.mem[i] = 64'd0; end
     repeat (5) @(posedge clk); rst_n = 1;
@@ -262,6 +324,35 @@ module tb_npu_cq;
     expect_cpl(701, 8'd0, 1);
     check("round trip with slaves waiting for WVALID", same_host(32'h4000, 32'hC000, 8192), 1);
     waits_w = 0;
+
+    // 9. GEMM: INT8 output with ReLU, INT8 without, INT32 output; bad shapes.
+    gemm_data(32'h4000, 32'h8000, 32'hF000, 3, 192, 128, 77);
+    submit_gemm(800, 3, 32'h4000, 32'h8000, 32'h10000, 32'hF000, 192, 128, 5'd9, 1'b1, 1'b0, 16'd37);
+    submit_gemm(801, 3, 32'h4000, 32'h8000, 32'h11000, 32'hF000, 192, 128, 5'd4, 1'b0, 1'b0, 16'd1000);
+    submit_gemm(802, 3, 32'h4000, 32'h8000, 32'h12000, 32'hF000, 192, 128, 5'd0, 1'b0, 1'b1, 16'd1);
+    ring_sq;
+    expect_cpl(800, 8'd0, 1);
+    expect_cpl(801, 8'd0, 1);
+    expect_cpl(802, 8'd0, 1);
+    // Also checked against the Python model: sw/npu/check_gemm.py reads this dump.
+    $writememh("card_mem_after_gemm.hex", card.mem);
+    gbad = 0;
+    for (gm = 0; gm < 3; gm = gm + 1)
+      for (gn = 0; gn < 128; gn = gn + 1) begin
+        gacc = ref_acc(32'h4000, 32'h8000, 32'hF000, 192, gm, gn);
+        if (cbyte(32'h10000 + gm * 128 + gn) !== ref_q(gacc, 16'd37, 5'd9, 1'b1)) gbad = gbad + 1;
+        if (cbyte(32'h11000 + gm * 128 + gn) !== ref_q(gacc, 16'd1000, 5'd4, 1'b0)) gbad = gbad + 1;
+        if (cword(32'h12000 + 4 * (gm * 128 + gn)) !== gacc) gbad = gbad + 1;
+      end
+    check("GEMM 3x192 . 192x128: outputs differing from the reference (of 1152)", gbad, 0);
+    check("GEMM with ReLU produced no negative outputs", cbyte(32'h10000 + 5) < 8'h80, 1);
+    submit_gemm(803, 1, 32'h4000, 32'h8000, 32'h10000, 32'hF000, 100, 128, 5'd0, 1'b0, 1'b0, 16'd1);   // K not a multiple of 64
+    submit_gemm(804, 1, 32'h4000, 32'h8000, 32'h10000, 32'hF000, 192, 10, 5'd0, 1'b0, 1'b0, 16'd1);    // N not a multiple of 64
+    submit_gemm(805, 1, 32'h4010, 32'h8000, 32'h10000, 32'hF000, 192, 128, 5'd0, 1'b0, 1'b0, 16'd1);   // A not 64-byte aligned
+    ring_sq;
+    expect_cpl(803, 8'd2, 1);
+    expect_cpl(804, 8'd2, 1);
+    expect_cpl(805, 8'd2, 1);
 
     repeat (20) @(posedge clk);
     check("host port AXI violations", host.violations, 0);
