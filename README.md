@@ -8,7 +8,7 @@ The reference pair is an AMD **AC701** (Artix-7 200T) as the card and an NXP **F
 
 Created by **Edgar Duarte**. Apache-2.0 licensed.
 
-[Architecture](ARCHITECTURE.md) · [Roadmap](ROADMAP.md) · [How edge-AI cards work](docs/edge-ai-accelerators.md) · [Hardware setup](docs/hardware-setup.md) · [Bring-up](docs/bringup.md) · [Debugging](docs/debugging.md) · [Register map](docs/register-map.md) · [Contribute](CONTRIBUTING.md)
+[Architecture](ARCHITECTURE.md) · [Roadmap](ROADMAP.md) · [How edge-AI cards work](docs/edge-ai-accelerators.md) · [Hardware setup](docs/hardware-setup.md) · [Bring-up](docs/bringup.md) · [Debugging](docs/debugging.md) · [Register map](docs/register-map.md) · [Command queue (design)](docs/command-queue.md) · [Contribute](CONTRIBUTING.md)
 
 ![The FRDM-i.MX95 on the left, joined by a flat riser cable to the PCIe edge connector of the AC701 on the right](docs/images/bench-setup.jpg)
 
