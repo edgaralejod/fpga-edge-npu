@@ -12,10 +12,10 @@ cd site/public && python3 -m http.server 8000     # http://localhost:8000
 
 `?flow=c2h&step=8` opens a data-flow journey at a given step.
 
-Deploy to Firebase Hosting:
+Published with GitHub Pages at <https://edgaralejod.github.io/fpga-edge-npu/>, served from the `gh-pages` branch, which holds only `site/public`. After committing site changes to `main`:
 
 ```sh
-cd site
-npx firebase-tools login
-npx firebase-tools deploy --only hosting --project <firebase-project-id>
+make site-publish      # splits site/public onto gh-pages and pushes it
 ```
+
+`firebase.json` is kept for hosting the same files on Firebase instead (`npx firebase-tools deploy --only hosting --project <id>`).
