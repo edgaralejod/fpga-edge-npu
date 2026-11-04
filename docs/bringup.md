@@ -83,7 +83,7 @@ sudo cp npu-card.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now npu-card.service
 ```
 
-Installed on the FRDM-i.MX95 on 2026-11-04. If the AC701 was not powered first, the unit fails with "no 10ee:7021 device" and the rest of the boot is unaffected.
+Installed on the FRDM-i.MX95 on 2026-11-04; after a reboot it loaded the driver on its own and `npu-ctl memtest` passed. If the AC701 was not powered first, the unit fails with "no 10ee:7021 device" and the rest of the boot is unaffected.
 
 To check the interrupt path, wait for user interrupt 0 and raise it from the `IRQ` register:
 
