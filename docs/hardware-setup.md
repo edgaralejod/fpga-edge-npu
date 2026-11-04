@@ -51,10 +51,23 @@ PCIe expects the card to be configured and ready within about 100 ms of the host
 2. Power the AC701 first. Wait for its DONE LED.
 3. Power the FRDM-i.MX95. Linux enumerates the card while booting.
 
-If you reload the FPGA over JTAG while the i.MX95 is running, the link drops. Reboot the i.MX95 to enumerate it again; a sysfs rescan may not retrain the link on this host (not yet tested).
+If you reload the FPGA over JTAG while the i.MX95 is running, the link drops. Reboot the i.MX95 to enumerate it again; a sysfs rescan may not retrain the link on this host (not yet tested). After `make flash` the FPGA reboots from flash, so reset the i.MX95 afterwards too.
+
+## Serial ports
+
+The FRDM-i.MX95's debug USB is a WCH CH344 quad serial adapter: four `ttyACM` ports on the build machine (numbering moves after a replug). On this bench they were, in order:
+
+| Port | What answers |
+| --- | --- |
+| first | Linux console (`ttyLP0`): log in as `root`, no password |
+| second | The System Manager's debug monitor (`>$` prompt; `help` lists commands). `reset` resets the whole SoC, which is the way to reboot the i.MX95 when the Linux console is unusable |
+| third | The Cortex-M33 power-mode demo |
+| fourth | Nothing seen |
+
+All at 115200 baud. The i.MX95 has no network in this setup; files go over the console as base64.
 
 ## Status of these steps
 
 Checked on hardware, 2026-11-04: JTAG programming and flash boot. The configuration settings in `hw/constr/ac701.xdc` (`CFGBVS VCCO`, `CONFIG_VOLTAGE 3.3`) match UG952, which puts bank 0 on `FPGA_3V3`, and the FPGA reads its CFGBVS pin as 1.
 
-Checked on hardware, 2026-11-04: the riser and the power arrangement in the photo above (each board on its own supply, grounds joined through the riser cable). The link trains at Gen2 x1 and DMA of 1 GiB passes in both directions; see [bring-up](bringup.md).
+Checked on hardware, 2026-11-04: the riser and the power arrangement in the photo above (each board on its own supply, grounds joined through the riser cable). The link trains at Gen2 x1 and DMA of 1 GiB passes in both directions; see [bring-up](bringup.md). Checked 2026-11-04: the System Manager's `reset` reboots the i.MX95, and the card enumerates again afterwards.

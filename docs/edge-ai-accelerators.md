@@ -31,11 +31,11 @@ The i.MX95 already has its own NPU (NXP's eIQ Neutron). A discrete card earns it
 
 | Accelerator part | This project | Phase |
 | --- | --- | --- |
-| PCIe endpoint, BARs, MSI | XDMA core; BAR0 control registers; MSI through `usr_irq` | 1 (now) |
-| DMA engine and descriptor rings | XDMA scatter-gather DMA, driven by the Xilinx driver | 1 (now) |
-| On-card memory | 1 GiB DDR3, 5.9 GB/s read measured inside the card (phase 2) | 1, 2 |
-| Doorbells and command queue | Command ring in host memory, doorbell register, completion interrupt | 3 |
-| Compute fabric | INT8 matrix engine on the Artix-7's 740 DSP slices | 4 |
+| PCIe endpoint, BARs, MSI | AMD's `axi_pcie` bridge; BAR0 control registers; MSI from the command queue (XDMA in phases 1 and 2) | 1, 3 (done) |
+| DMA engine and descriptor rings | `npu_cq`: the card fetches commands and moves data itself, 419 MB/s | 3 (done) |
+| On-card memory | 1 GiB DDR3, 5.9 GB/s read measured inside the card | 2 (done) |
+| Doorbells and command queue | Command ring in host memory, doorbell register, completions with a phase bit, MSI; 3.8 µs per command round trip | 3 (done) |
+| Compute fabric | INT8 GEMM engine, 64 MACs per clock on 64 of the Artix-7's 740 DSP slices, 6.5 GMAC/s; MNIST at 55 000 images/s. Convolutions next | 4 (GEMM done) |
 | Compiler and model binary | Python tool: quantized model to a card program | 5 |
 | Runtime and benchmarks | Host library, then the same model on CPU, Neutron NPU and the card | 6 |
 

@@ -16,7 +16,7 @@ The host side targets embedded Linux on an NXP i.MX95, the class of host that di
 | PCIe endpoint | AMD's AXI Memory Mapped to PCI Express bridge (`axi_pcie`, PG055) in the `card_sys` block design (`hw/bd/card_sys.tcl`) | Configuration space (device `10ee:ed10`, class `12 00 00`), BAR0 as an AXI master, a slave window through which the card reads and writes host memory (AXI `0x8000_0000` reaches bus address 0, 2 GiB), MSI. 64-bit AXI at 125 MHz. |
 | Control plane | `hw/rtl/npu_regs.v` on BAR0 | Every host-visible control and status bit of the card, the command queue's doorbells included. AXI4-Lite through a SmartConnect converter, on AMD's AXI4-Lite slave template. [Register map](docs/register-map.md). |
 | Command queue | `hw/rtl/npu_cq.v` | Fetches 64-byte commands from a ring in host memory, runs them, writes 16-byte completions with a phase bit and card timestamps, requests MSIs. Copies between host and card memory stream through a FIFO. [Command queue](docs/command-queue.md). |
-| Compute | `hw/rtl/npu_mm.v`, behind `npu_cq`'s `GEMM` command | INT8 matrix multiply with INT32 accumulation, bias, requantization and ReLU, eight MACs per cycle, reading and writing card memory. `sw/npu/npu_ref.py` is its bit-exact model. |
+| Compute | `hw/rtl/npu_mm.v`, behind `npu_cq`'s `GEMM` command | INT8 matrix multiply with INT32 accumulation, bias, requantization and ReLU, reading and writing card memory. Tiles of 8 rows of A: each weight beat feeds 64 MACs per cycle on 64 DSP slices (8 GMAC/s peak, 6.5 measured). `sw/npu/npu_ref.py` is its bit-exact model. |
 | Card memory | MIG, SmartConnect and DDR3 SODIMM in `card_sys` | 1 GiB of DDR3 at AXI address 0 (800 MT/s, 64 bits), shared by `npu_cq` (64-bit, 125 MHz), `mem_bw` (512-bit, 100 MHz) and a JTAG-to-AXI master. |
 | Card-side memory engine | `hw/rtl/mem_bw.v` | 512-bit AXI4 bursts (4 KiB, up to 16 in flight) that measure DDR3 bandwidth without the PCIe link and check the data they read back. Controlled from BAR0 (`BW_*`). |
 | Top level | `hw/rtl/npu_top.v` | Wires the parts; owns the reference and debug clocks, the LEDs and the DMA counters (`axi_dma_mon`). |
@@ -56,6 +56,8 @@ flowchart LR
 
 **One GEMM engine before a network-specific pipeline.** The first compute block is a general INT8 matrix multiply with requantization: with a model compiler, it runs any network that fits in card memory (Ara's approach). A pipelined, weights-on-chip variant (Hailo's) is the comparison planned for later.
 
+**Reuse before more multipliers (0.5.0).** The first engine (0.4.0) read every weight once per row of A: 8 MACs per 8-byte beat, 0.87 GMAC/s, slower than one Cortex-A55 core with NEON (1.55 GMAC/s). The data was the limit, not the arithmetic: one 64-bit beat per cycle is all the card port delivers. Holding 8 rows of A on chip lets each weight beat do 8 times the work, so 0.5.0 reaches 6.5 GMAC/s from the same memory traffic. This is the arithmetic-intensity argument behind every NPU's on-chip buffers. It helps batches only: a single image (M = 1) still runs at 8 MACs per cycle, so one MNIST image takes the same 155 µs on both versions.
+
 **Bitstream in SPI flash.** The host enumerates PCIe once at boot, and expects the card ready within about 100 ms of releasing PERST#. The card configures itself from flash at power-on, compressed to shorten configuration time, and is powered before the host.
 
 **Non-project Tcl builds.** `hw/scripts/build.tcl` runs synthesis to bitstream from source and settings alone, so a clean clone builds with one command and the repository holds no generated files. Timing failure stops the build. `hw/scripts/create_project.tcl` makes a Vivado project from the same sources for exploring in the GUI; it is disposable.
@@ -70,10 +72,10 @@ flowchart LR
 
 | Level | How | Where |
 | --- | --- | --- |
-| Command queue engine | `tb_npu_cq`: the testbench plays the driver against two AXI memory models (host and card) with random stalls, read latency and slaves that wait for write data; NOPs in order across ring wraps, a full CQ stalling, copy round trips byte for byte, rejected commands, AXI errors, MSIs. A phase-bit mutant fails it. | `hw/sim/tb_npu_cq.v`, `hw/sim/axi_mem_model.v` |
+| Command queue and GEMM engines | `tb_npu_cq`: the testbench plays the driver against two AXI memory models (host and card) with random stalls, read latency and slaves that wait for write data; NOPs in order across ring wraps, a full CQ stalling, copy round trips byte for byte, rejected commands, AXI errors, MSIs; GEMMs against a reference in the testbench (INT8 with and without ReLU, INT32, rejected shapes, K = 2048 with N = 1024, 19 rows in tiles of 8, 8 and 3), and against `npu_ref.py` from a memory dump (`sw/npu/check_gemm.py`). A phase-bit mutant and the N = 1024 bug each fail it. | `hw/sim/tb_npu_cq.v`, `hw/sim/axi_mem_model.v` |
 | Register block | Self-checking XSim testbench: identity, byte strobes, channel ordering, read-only behavior, counter coherence, interrupt handshake, back-to-back reads with RREADY held high as XDMA does, and an AXI handshake-order monitor. | `hw/sim/tb_npu_regs.v`, `make sim` |
 | Full design | Timing closure and DRC on every build. | `build/reports/` |
 | Memory system on hardware | JTAG-only DDR3 test (`make jtag-memtest`), host `npu-ctl memtest` over the full 1 GiB, AXI protocol checkers in the System ILAs. | [Debugging](docs/debugging.md), [bring-up](docs/bringup.md) |
-| Hardware | Bring-up checklist, filled in with dated results. | [docs/bringup.md](docs/bringup.md) |
+| Hardware | Bring-up checklist, filled in with dated results; `npu-test all` (queue, copies, random GEMMs against the CPU) and `npu-mnist` (10 000 images against the CPU and the bit-exact model), raw logs in `docs/results/`. | [docs/bringup.md](docs/bringup.md) |
 
 The XDMA example simulation is not part of the flow: it exceeds the instance limit of Vivado's free simulator tier. The project's own blocks are kept small enough to test in XSim, and the PCIe path is tested on hardware.

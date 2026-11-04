@@ -1,6 +1,6 @@
-# Command queue (phase 3 design)
+# Command queue
 
-Status: the queue engine (`hw/rtl/npu_cq.v`) and the matrix engine behind its `GEMM` command (`hw/rtl/npu_mm.v`) are written and pass their testbench (`hw/sim/tb_npu_cq.v`); they are not in the bitstream yet, and the driver is not written. This document is the contract between the engine and the project's Linux driver (`fpga-npu`). Change both together.
+Status: on the card since 0.4.0 and passing its acceptance tests on the FRDM-i.MX95 (2026-11-04; results below and in [bring-up](bringup.md)). The queue engine is `hw/rtl/npu_cq.v`, the matrix engine behind its `GEMM` command `hw/rtl/npu_mm.v`, both tested in `hw/sim/tb_npu_cq.v`; the host side is the `fpga-npu` driver (`sw/driver/`) and the runtime (`sw/npu/npu.c`). This document is the contract between them. Change both together.
 
 ## Why a queue
 
@@ -94,7 +94,7 @@ Computes `C = requant(A · Btᵀ + bias)` entirely in card memory. A is M × K I
 
 For INT8 output, `C[m][n] = clamp(relu?((acc · mult + 2^(shift−1)) >> shift), −128, 127)` with an arithmetic shift (no rounding term when `shift` is 0), where `acc = Σ A[m][k]·Bt[n][k] + bias[n]` in 32 bits. All four addresses are 64-byte aligned, and every region lies inside the 1 GiB of card memory; otherwise the command completes with `BAD_LENGTH` and nothing runs.
 
-The engine loads one row of A into block RAM, streams all of Bt past it at one 64-bit beat (eight multiply-accumulates) per 125 MHz cycle, and writes the row of C: about M × N × K / 8 cycles per command, with B re-read for every row of A. That is enough to run a small network and to measure; reusing B across rows is the obvious next step.
+The engine works on tiles of up to 8 rows of A: it loads them into block RAM, streams all of Bt past them at one 64-bit beat per 125 MHz cycle, each beat feeding 8 bytes of every row (64 multiply-accumulates), and writes the tile's rows of C. That is about ⌈M / 8⌉ × N × K / 8 cycles per command, Bt being read once per tile. Measured on the card (0.5.0): 6.5 GMAC/s on 64 × 832 · 832 × 128 and 203 × 512 · 512 × 256, 81 % of the 8 GMAC/s peak. Version 0.4.0 read Bt once per row of A, 8 MACs per cycle: 0.87 GMAC/s. A single row (M = 1) still runs at 8 MACs per cycle.
 
 ## Completion (16 bytes, little-endian)
 
@@ -129,10 +129,16 @@ The settings registers (`CQ_ENTRIES_LOG2`, the base addresses) ignore writes whi
 
 ## Acceptance (roadmap phase 3)
 
-- 10 000 or more `NOP` commands, submitted in batches, each completed exactly once, in order, with matching `cid`s and correct phase bits.
-- `COPY_H2C` then `COPY_C2H` round trips of host buffers through card memory match byte for byte, with the IOMMU translating.
-- Per-command latency: the card's `t_done − t_fetch`, and the host's doorbell-to-completion time, reported as distributions.
-- The driver passes the same tests after `rmmod` and `insmod`, and after the host reboots with the card left powered.
+`npu-test all` on the i.MX95 runs all of them; measured 2026-11-04, card 0.4.0:
+
+| Test | Result |
+| --- | --- |
+| 10 000 or more `NOP` commands, submitted in batches, each completed exactly once, in order, with matching `cid`s and correct phase bits | Pass: 100 000 in batches of 63, 0 out of order or failed, 503 000 commands/s (1.99 µs each) |
+| `COPY_H2C` then `COPY_C2H` round trips of host buffers through card memory match byte for byte, with the IOMMU translating | Pass: 4 KiB × 200, 1 MiB × 20, 8 MiB × 4, 0 mismatches. 8 MiB: 419 MB/s to the card, 416 MB/s back (card timestamps) |
+| Per-command latency: the card's `t_done − t_fetch`, and the host's doorbell-to-completion time, as distributions | One `NOP` at a time, 2000 runs: polling, median 3.83 µs, p99 4.00 µs; sleeping on the MSI, median 13.8 µs, p99 19.4 µs. The card's own time for a `NOP`: 8 ns, one cycle |
+| The same tests after `rmmod` and `insmod`, and after the host reboots with the card left powered | Pass (see [bring-up](bringup.md), phase 3) |
+
+Almost all of a `NOP`'s 3.83 µs is the link: the posted doorbell write, the card's 64-byte read of the command from host memory (a full PCIe round trip through the IOMMU), and the completion write the CPU then sees. In a batch the card fetches the next command while the host is still reading completions, so commands cost 1.99 µs each.
 
 ## Open questions
 
@@ -140,5 +146,5 @@ The settings registers (`CQ_ENTRIES_LOG2`, the base addresses) ignore writes whi
 | --- | --- |
 | Commands fetched one at a time or in bursts? | Start with one 64-byte read per command; measure; fetch several when the doorbell shows a backlog. |
 | Interrupt per command or coalesced? | Per command when `flags[0]` is set; the host sets it on the last command of a batch. Add a timer-based coalescer if the host spends its time in the interrupt handler. |
-| Copies through the 64-bit bridge, or wider? | The bridge's AXI side is 64 bits at 125 MHz for Gen2 x1 (PG055, and AMD's IP script for `axi_aclk_out`): 1 GB/s, above the 500 MB/s the link carries, so the bridge is not the limit. In simulation `npu_cq` moves a 32 KiB copy in 4414 cycles for 4096 beats, 93 % of one beat per cycle. |
-| Fixed or programmable translation window? | Fixed (`0x8000_0000` → bus address 0, 2 GiB) with a 31-bit DMA mask; to be confirmed against PG055 and on hardware. The bridge can also expose its translation registers (`INCLUDE_BAROFFSET_REG`) if the i.MX95's IOMMU hands out addresses above 2 GiB. |
+| Copies through the 64-bit bridge, or wider? | The bridge's AXI side is 64 bits at 125 MHz for Gen2 x1 (PG055, and AMD's IP script for `axi_aclk_out`): 1 GB/s, above the 500 MB/s the link carries, so the bridge is not the limit. In simulation `npu_cq` moves a 32 KiB copy in 4415 cycles for 4096 beats, 93 % of one beat per cycle; on the card copies reach 419 MB/s, 84 % of the link. |
+| Fixed or programmable translation window? | Fixed (`0x8000_0000` → bus address 0, 2 GiB) with a 31-bit DMA mask; confirmed on hardware, where the IOMMU places the driver's arena at bus `0x7e000000`. The bridge can also expose its translation registers (`INCLUDE_BAROFFSET_REG`) if the i.MX95's IOMMU hands out addresses above 2 GiB. |

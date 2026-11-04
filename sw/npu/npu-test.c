@@ -137,10 +137,16 @@ static int cmd_gemm(uint32_t m, uint32_t k, uint32_t n) {
   if (npu_gemm(&N, &g8, &c1) || npu_gemm(&N, &g32, &c2)) { fprintf(stderr, "gemm: status %u, %u\n", c1.status, c2.status); return 1; }
   if (npu_copy(&N, NPU_OP_COPY_C2H, sc8, bc8, kc8) || npu_copy(&N, NPU_OP_COPY_C2H, sc32, bc32, kc32)) return 1;
 
+  // The CPU works on cached copies: the arena is uncached, and reading it
+  // directly would make the CPU look several times slower than it is.
+  int8_t *ha = malloc(sa), *hb = malloc(sb);
+  int32_t *hbias = malloc(sbias);
+  memcpy(ha, a, sa); memcpy(hb, bt, sb); memcpy(hbias, bias, sbias);
   double t0 = npu_now();
-  npu_gemm_ref(a, bt, bias, r8, m, k, n, 12, 1, 0, 300);
+  npu_gemm_ref(ha, hb, hbias, r8, m, k, n, 12, 1, 0, 300);
   double tcpu = npu_now() - t0;
-  npu_gemm_ref(a, bt, bias, r32, m, k, n, 0, 0, 1, 1);
+  npu_gemm_ref(ha, hb, hbias, r32, m, k, n, 0, 0, 1, 1);
+  free(ha); free(hb); free(hbias);
   long bad8 = 0, bad32 = 0;
   for (size_t i = 0; i < sc8; i++) bad8 += c8[i] != r8[i];
   for (size_t i = 0; i < (size_t)m * n; i++) bad32 += c32[i] != r32[i];
@@ -170,6 +176,7 @@ int main(int argc, char **argv) {
     rc |= cmd_copy(8 << 20, 4);
     rc |= cmd_gemm(64, 832, 128);
     rc |= cmd_gemm(7, 2048, 1024);
+    rc |= cmd_gemm(203, 512, 256);                         // tiles of 8 rows, the last one short
     printf("all       %s\n", rc ? "FAIL" : "PASS");
   } else { fprintf(stderr, "usage: npu-test info | nop [n] | latency [n] | copy [bytes] [loops] | gemm [m k n] | all\n"); rc = 2; }
   npu_close(&N);

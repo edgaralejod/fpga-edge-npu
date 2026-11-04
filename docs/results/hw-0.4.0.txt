@@ -1,0 +1,36 @@
+2026-11-04, card 0.4.0 build 26110420 (before the N=1024 fix), FRDM-i.MX95, fpga_npu.ko
+npu-test all (first run; nop FAIL was the runtime's cid bug, fixed in npu.c):
+latency   NOP, polling, 2000 runs: round trip median 3.83 us, p99 4.00 us, min 3.62 us; card execution median 0.008 us
+latency   NOP, interrupt, 2000 runs: round trip median 13.83 us, p99 19.37 us, min 11.71 us; card execution median 0.008 us
+copy      4096 B x 200: host->card 261.9 MB/s, card->host 387.6 MB/s (card timestamps), 0 mismatched loops: PASS
+copy      1048576 B x 20: host->card 418.4 MB/s, card->host 416.7 MB/s (card timestamps), 0 mismatched loops: PASS
+copy      8388608 B x 4: host->card 419.2 MB/s, card->host 416.2 MB/s (card timestamps), 0 mismatched loops: PASS
+gemm      64x832 . 832x128: 0 of 8192 INT8 and 0 of 8192 INT32 outputs differ from the CPU; card 7.834 ms (870 MMAC/s), CPU reference 128.929 ms (53 MMAC/s): PASS
+gemm      7x2048 . 2048x1024: 7168 of 7168 INT8 and 7168 of 7168 INT32 outputs differ from the CPU; card 16.545 ms (887 MMAC/s), CPU reference 277.069 ms (53 MMAC/s): FAIL   (N=1024 bug)
+nop (after the cid fix) 100000 commands in batches of 63: 0 out of order or failed; 503480 commands/s (1.99 us each): PASS
+npu-mnist:
+model     784 -> 128 (ReLU) -> 10, padded to K 832 and N 64; layer 1 requant mult 57505 shift 27
+card      10000 images: accuracy 97.11 %; logits differing from the CPU 0 of 100000; predictions differing from train.py 0
+card      layer 1 1224.0 ms, layer 2 111.9 ms (7486 images/s, 859 MMAC/s of padded work); images up 19.8 ms, logits down 6.1 ms; end to end on the host 1362.3 ms
+cpu       one Cortex-A55 core, scalar C: 736.6 ms (13577 images/s, 1557 MMAC/s), accuracy 97.11 %
+latency   one image (upload, 2 layers, download, argmax), 200 runs: median 155.3 us, p99 160.8 us on the host; 148.2 us on the card; 0 predictions differing from the CPU
+TRACE {"image":199,"label":2,"pred":2,"host_us":{"prepare":0.00,"doorbell":0.37,"done":155.17},"card_us":[{"cmd":"COPY_H2C image","fetch":0.000,"done":5.480},{"cmd":"GEMM layer 1","fetch":7.392,"done":130.920},{"cmd":"GEMM layer 2","fetch":132.808,"done":144.840},{"cmd":"COPY_C2H logits","fetch":146.752,"done":148.192}]}
+mnist     PASS
+
+2026-11-04, card 0.4.0 build 26110421 (N=1024 fix), npu-test all:
+version   0.4.0, build 26110421
+caps      0x0400000f: 1024 MiB card memory, DDR3, command queue, GEMM
+status    0x00000007 (link up, ddr calibrated)
+queue     64 entries, SQ at bus 0x7e000000, CQ at bus 0x7e001000, CQ_STATUS 0x0, completed 0
+arena     32 MiB at bus 0x7e000000
+nop       100000 commands in batches of 63: 0 out of order or failed; 504789 commands/s (1.98 us each): PASS
+latency   NOP, polling, 2000 runs: round trip median 3.83 us, p99 4.00 us, min 3.62 us; card execution median 0.008 us
+latency   NOP, interrupt, 2000 runs: round trip median 107.37 us, p99 119.37 us, min 12.33 us; card execution median 0.008 us
+copy      4096 B x 200: host->card 261.8 MB/s, card->host 387.6 MB/s (card timestamps), 0 mismatched loops: PASS
+copy      1048576 B x 20: host->card 418.4 MB/s, card->host 416.7 MB/s (card timestamps), 0 mismatched loops: PASS
+copy      8388608 B x 4: host->card 419.2 MB/s, card->host 416.2 MB/s (card timestamps), 0 mismatched loops: PASS
+gemm      64x832 . 832x128: 0 of 8192 INT8 and 0 of 8192 INT32 outputs differ from the CPU; card 7.834 ms (870 MMAC/s), CPU reference 4.392 ms (1552 MMAC/s): PASS
+gemm      7x2048 . 2048x1024: 0 of 7168 INT8 and 0 of 7168 INT32 outputs differ from the CPU; card 16.557 ms (887 MMAC/s), CPU reference 9.627 ms (1525 MMAC/s): PASS
+gemm      203x512 . 512x256: 0 of 51968 INT8 and 0 of 51968 INT32 outputs differ from the CPU; card 30.426 ms (875 MMAC/s), CPU reference 17.533 ms (1518 MMAC/s): PASS
+all       PASS
+RC=0

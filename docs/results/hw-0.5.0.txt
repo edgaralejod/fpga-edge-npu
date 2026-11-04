@@ -1,0 +1,27 @@
+2026-11-04, card 0.5.0 build 26110421 (8-row GEMM tiles), FRDM-i.MX95, fpga_npu.ko
+npu-test all:
+version   0.5.0, build 26110421
+caps      0x0400000f: 1024 MiB card memory, DDR3, command queue, GEMM
+status    0x00000007 (link up, ddr calibrated)
+queue     64 entries, SQ at bus 0x7e000000, CQ at bus 0x7e001000, CQ_STATUS 0x0, completed 0
+arena     32 MiB at bus 0x7e000000
+nop       100000 commands in batches of 63: 0 out of order or failed; 507405 commands/s (1.97 us each): PASS
+latency   NOP, polling, 2000 runs: round trip median 3.79 us, p99 4.00 us, min 3.62 us; card execution median 0.008 us
+latency   NOP, interrupt, 2000 runs: round trip median 12.08 us, p99 13.96 us, min 11.62 us; card execution median 0.008 us
+copy      4096 B x 200: host->card 261.7 MB/s, card->host 387.6 MB/s (card timestamps), 0 mismatched loops: PASS
+copy      1048576 B x 20: host->card 418.4 MB/s, card->host 416.7 MB/s (card timestamps), 0 mismatched loops: PASS
+copy      8388608 B x 4: host->card 419.2 MB/s, card->host 416.2 MB/s (card timestamps), 0 mismatched loops: PASS
+gemm      64x832 . 832x128: 0 of 8192 INT8 and 0 of 8192 INT32 outputs differ from the CPU; card 1.045 ms (6523 MMAC/s), CPU reference 4.406 ms (1547 MMAC/s): PASS
+gemm      7x2048 . 2048x1024: 0 of 7168 INT8 and 0 of 7168 INT32 outputs differ from the CPU; card 2.392 ms (6137 MMAC/s), CPU reference 9.626 ms (1525 MMAC/s): PASS
+gemm      203x512 . 512x256: 0 of 51968 INT8 and 0 of 51968 INT32 outputs differ from the CPU; card 4.069 ms (6539 MMAC/s), CPU reference 17.558 ms (1515 MMAC/s): PASS
+all       PASS
+RC=0
+npu-mnist:
+model     784 -> 128 (ReLU) -> 10, padded to K 832 and N 64; layer 1 requant mult 57505 shift 27
+card      10000 images: accuracy 97.11 %; logits differing from the CPU 0 of 100000; predictions differing from train.py 0
+card      layer 1 163.1 ms, layer 2 18.7 ms (55032 images/s, 6311 MMAC/s of padded work); images up 19.8 ms, logits down 6.1 ms; end to end on the host 208.1 ms
+cpu       one Cortex-A55 core, scalar C: 735.6 ms (13595 images/s, 1559 MMAC/s), accuracy 97.11 %
+latency   one image (upload, 2 layers, download, argmax), 200 runs: median 155.3 us, p99 158.0 us on the host; 148.3 us on the card; 0 predictions differing from the CPU
+TRACE {"image":199,"label":2,"pred":2,"host_us":{"prepare":0.00,"doorbell":0.33,"done":155.33},"card_us":[{"cmd":"COPY_H2C image","fetch":0.000,"done":5.488},{"cmd":"GEMM layer 1","fetch":7.376,"done":130.960},{"cmd":"GEMM layer 2","fetch":132.856,"done":144.936},{"cmd":"COPY_C2H logits","fetch":146.832,"done":148.272}]}
+mnist     PASS
+RC=0

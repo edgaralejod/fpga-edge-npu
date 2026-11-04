@@ -17,7 +17,7 @@ All registers are 32 bits wide and must be accessed as aligned 32-bit words. Wri
 | Offset | Name | Access | Reset | Description |
 | --- | --- | --- | --- | --- |
 | `0x000` | ID | RO | `0x4E505530` | ASCII `NPU0`. A host tool checks this before trusting anything else. |
-| `0x004` | VERSION | RO | `0x00000400` | `[23:16]` major, `[15:8]` minor, `[7:0]` patch. 0.1.x is phase 1 (0.1.1 fixed back-to-back reads; 0.1.0 answered only the first BAR0 read after reset). 0.2.0 is phase 2: DDR3 card memory. 0.3.0 adds the card-side bandwidth engine (`BW_*`). 0.4.0 is phase 3: the command queue (`CQ_*`), the GEMM engine, and the `axi_pcie` bridge in place of XDMA. |
+| `0x004` | VERSION | RO | `0x00000500` | `[23:16]` major, `[15:8]` minor, `[7:0]` patch. 0.1.x is phase 1 (0.1.1 fixed back-to-back reads; 0.1.0 answered only the first BAR0 read after reset). 0.2.0 is phase 2: DDR3 card memory. 0.3.0 adds the card-side bandwidth engine (`BW_*`). 0.4.0 is phase 3: the command queue (`CQ_*`), the GEMM engine, and the `axi_pcie` bridge in place of XDMA. 0.5.0: the GEMM engine works on tiles of 8 rows of A (64 MACs per cycle instead of 8); no register changes. |
 | `0x008` | BUILD | RO | build ID | Set at build time, by default the build hour as `YYMMDDHH` in hex digits, from the build machine's clock (`0x26110315` = 2026-11-03, hour 15). Pass another value as the second `build.tcl` argument. |
 | `0x00C` | CAPS | RO | `0x0400000F` | `[31:16]` card memory in MiB (1024). `[3]` GEMM engine. `[2]` command queue. `[1]` card memory is DDR3. `[0]` DMA path present. Before 0.2.0, `[31:16]` counted KiB. |
 | `0x010` | SCRATCH | RW | `0x00000000` | Free for read/write tests. Honors byte strobes. |

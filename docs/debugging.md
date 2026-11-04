@@ -34,7 +34,7 @@ sudo ./npu-ctl info
 #   dma axi   1024 writes, 1024 reads, 0 error responses
 ```
 
-The DMA counters count AXI bursts on XDMA's side of the interconnect and wrap at 2³². Compare them before and after a transfer: no change means the DMA never reached the card's memory system; error responses mean it did and the interconnect or the MIG refused it.
+The DMA counters count AXI bursts on `npu_cq`'s card port (copies and GEMM; XDMA's AXI master before 0.4.0) and wrap at 2³². Compare them before and after a transfer: no change means the DMA never reached the card's memory system; error responses mean it did and the interconnect or the MIG refused it.
 
 `npu-ctl dmatest` and `npu-ctl memtest` refuse to run while STATUS says the DDR3 is not calibrated.
 

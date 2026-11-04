@@ -371,6 +371,37 @@ module tb_npu_cq;
     end
     check("GEMM 1x2048 . 2048x1024: outputs differing from the reference (of 2048)", gbad, 0);
 
+    // 11. Tiles: M = 19 is two full 8-row tiles and a short one of 3. Then
+    // the speed-up of the tiles: Bt is read once per 8 rows, not per row.
+    gemm_data(32'h30000, 32'h31000, 32'h34000, 19, 128, 64, 55);
+    submit_gemm(808, 19, 32'h30000, 32'h31000, 32'h35000, 32'h34000, 128, 64, 5'd7, 1'b1, 1'b0, 16'd90);
+    submit_gemm(809, 19, 32'h30000, 32'h31000, 32'h36000, 32'h34000, 128, 64, 5'd0, 1'b0, 1'b1, 16'd1);
+    ring_sq;
+    expect_cpl(808, 8'd0, 1);
+    expect_cpl(809, 8'd0, 1);
+    gbad = 0;
+    for (gm = 0; gm < 19; gm = gm + 1)
+      for (gn = 0; gn < 64; gn = gn + 1) begin
+        gacc = ref_acc(32'h30000, 32'h31000, 32'h34000, 128, gm, gn);
+        if (cbyte(32'h35000 + gm * 64 + gn) !== ref_q(gacc, 16'd90, 5'd7, 1'b1)) gbad = gbad + 1;
+        if (cword(32'h36000 + 4 * (gm * 64 + gn)) !== gacc) gbad = gbad + 1;
+      end
+    check("GEMM 19x128 . 128x64 in tiles of 8, 8 and 3: outputs differing from the reference (of 2432)", gbad, 0);
+    check("bytes after the last C row untouched", cbyte(32'h35000 + 19 * 64), 0);
+    gemm_data(32'h40000, 32'h50000, 32'h48000, 64, 512, 256, 33);
+    submit_gemm(810, 64, 32'h40000, 32'h50000, 32'h70000, 32'h48000, 512, 256, 5'd12, 1'b0, 1'b0, 16'd7);
+    ring_sq;
+    expect_cpl(810, 8'd0, 1);
+    $display("info  GEMM 64x512 . 512x256: %0d cycles, %0d MACs per cycle (Bt alone: %0d beats per tile, 8 tiles)",
+             w1[63:32] - w1[31:0], 64 * 512 * 256 / (w1[63:32] - w1[31:0]), 256 * 512 / 8);
+    gbad = 0;
+    for (gm = 0; gm < 64; gm = gm + 7)
+      for (gn = 0; gn < 256; gn = gn + 1) begin
+        gacc = ref_acc(32'h40000, 32'h50000, 32'h48000, 512, gm, gn);   // static functions: one call per statement
+        if (cbyte(32'h70000 + gm * 256 + gn) !== ref_q(gacc, 16'd7, 5'd12, 1'b0)) gbad = gbad + 1;
+      end
+    check("GEMM 64x512 . 512x256, every 7th row: outputs differing from the reference (of 2560)", gbad, 0);
+
     repeat (20) @(posedge clk);
     check("host port AXI violations", host.violations, 0);
     check("card port AXI violations", card.violations, 0);

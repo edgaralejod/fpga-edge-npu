@@ -128,7 +128,7 @@ module npu_regs #(
 
   localparam [31:0] ID_VALUE      = 32'h4E50_5530; // "NPU0"
   localparam [7:0]  VERSION_MAJOR = 8'd0;
-  localparam [7:0]  VERSION_MINOR = 8'd4;
+  localparam [7:0]  VERSION_MINOR = 8'd5;
   localparam [7:0]  VERSION_PATCH = 8'd0;
 
   // CAPS: [31:16] card memory in MiB, [3] GEMM engine, [2] command queue,

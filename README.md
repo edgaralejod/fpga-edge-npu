@@ -4,7 +4,7 @@ An open neural-processing card built on an FPGA. The card plugs into an embedded
 
 The reference pair is an AMD **AC701** (Artix-7 200T) as the card and an NXP **FRDM-i.MX95** as the host, joined through the i.MX95 board's M.2 Key-M slot. The goal is to learn and show, by building one, how a discrete edge-AI accelerator works from the bus up.
 
-**Status: phases 1 and 2 done; phase 3 (command queue and own driver) is next.** On the FRDM-i.MX95 the card enumerates at PCIe Gen2 x1, DMA reaches about 370 MB/s host to card and 340 MB/s back, and the whole 1 GiB of card DDR3 passes write-then-verify tests from the host and from inside the FPGA. Inside the card, the DDR3 delivers 5.5 GB/s writing and 5.9 GB/s reading, 85 to 93 % of its peak. [Bring-up](docs/bringup.md) has the measurements and the problems found on the way, including a cache-maintenance bug in AMD's XDMA driver that the i.MX95's IOMMU exposed, found and patched; [debugging](docs/debugging.md) covers the ILAs, VIO and JTAG tests built into the card. There is no inference engine yet; the [roadmap](ROADMAP.md) says what comes next and when each step counts as done.
+**Status: phases 1 to 3 done; phase 4 (compute engine) has its GEMM working on the card.** The FRDM-i.MX95 drives the card through the project's own driver and a command queue the card fetches from host memory, NVMe style: 505 000 commands/s, 3.8 µs for one command's round trip, copies at 419 MB/s over PCIe Gen2 x1. The card's INT8 matrix engine runs an MNIST network at 97.11 % accuracy, bit for bit the same as the CPU, at 55 000 images/s: 4 times one Cortex-A55 core. [Bring-up](docs/bringup.md) has every measurement and the problems found on the way, including a cache-maintenance bug in AMD's XDMA driver that the i.MX95's IOMMU exposed in phase 2; [debugging](docs/debugging.md) covers the ILAs, VIO and JTAG tests built into the card. Next: convolutions and a model compiler ([roadmap](ROADMAP.md)).
 
 Created by **Edgar Duarte**. Apache-2.0 licensed, except the Linux kernel driver in `sw/driver/`, which is GPL-2.0 as kernel modules must be.
 
@@ -19,18 +19,22 @@ Created by **Edgar Duarte**. Apache-2.0 licensed, except the Linux kernel driver
 ```
  FRDM-i.MX95 (host)                          AC701 (card)
  ┌────────────────────────┐   PCIe Gen2 x1   ┌──────────────────────────────────┐
- │ Linux                  │   M.2 Key-M to   │ XDMA PCIe endpoint (10ee:7021)   │
- │  npu-ctl, XDMA driver  │◄────────────────►│  BAR0 ─► npu_regs (control)      │
- │                        │   x4 slot riser  │  BAR1 ─► DMA engine ─► 1 GiB     │
- └────────────────────────┘                  │                  DDR3 card memory│
-                                             └──────────────────────────────────┘
+ │ Linux                  │   M.2 Key-M to   │ axi_pcie bridge (10ee:ed10)      │
+ │  npu-mnist, npu-test   │◄────────────────►│  BAR0 ─► npu_regs (doorbells)    │
+ │  runtime (npu.c)       │   x4 slot riser  │  npu_cq ◄─► host memory: fetches │
+ │  fpga-npu driver       │                  │     commands, copies, completions│
+ │  DMA arena: SQ, CQ,    │                  │  npu_mm: INT8 GEMM, 64 MAC/clock │
+ │  tensors               │                  │  1 GiB DDR3 card memory          │
+ └────────────────────────┘                  └──────────────────────────────────┘
 ```
 
-- **PCIe endpoint.** AMD's DMA/Bridge Subsystem (XDMA), Gen2 x1, class code `12 00 00` (processing accelerator). The i.MX95 slot is a single PCIe 3.0 lane and the Artix-7 tops out at Gen2, so the link trains at 5 GT/s x1.
-- **Control plane (BAR0).** `npu_regs`, an AXI-Lite register block written for this project: identity, version and build ID, a scratch register, a 64-bit cycle counter for latency measurements, software LEDs, a software-raised interrupt to exercise MSI, and the DDR3 status and DMA counters. See the [register map](docs/register-map.md).
-- **Data plane (BAR1).** XDMA's scatter-gather DMA engine moves buffers between host memory and the card's 1 GiB DDR3 SODIMM, through AMD's memory controller (MIG), the place where weights and tensors will later live. Phase 1 used 64 KiB of block RAM.
-- **Debug.** System ILAs with AXI protocol checkers on both sides of the memory interconnect, a VIO, a JTAG-to-AXI master and DMA counters in BAR0; see [debugging](docs/debugging.md).
-- **Host tool.** `npu-ctl` reads and writes registers, tests the scratch register, measures BAR0 read latency, runs a DMA loopback with throughput figures, tests all of card memory, and measures the DDR3's bandwidth from inside the card. It cross-compiles for the i.MX95 (aarch64).
+- **PCIe endpoint.** AMD's AXI Memory Mapped to PCI Express bridge, Gen2 x1, class code `12 00 00` (processing accelerator). The i.MX95 slot is a single PCIe 3.0 lane and the Artix-7 tops out at Gen2, so the link trains at 5 GT/s x1. The bridge has no DMA engine of its own: the card's logic reads and writes host memory through it.
+- **Control plane (BAR0).** `npu_regs`: identity, version, a cycle counter, interrupt test, DDR3 status, DMA counters, the bandwidth engine, and the command queue's settings and doorbells. See the [register map](docs/register-map.md).
+- **Command queue.** `npu_cq` fetches 64-byte commands from a ring in host memory after a doorbell, runs them (no-op, copies between host and card memory, GEMM), and writes 16-byte completions with a phase bit, status and card timestamps, with an MSI on request. See [command queue](docs/command-queue.md).
+- **Compute.** `npu_mm` multiplies INT8 matrices from card memory with INT32 sums, bias, scaling, rounding, ReLU and clamping, on tiles of 8 rows: 64 multiply-accumulates per clock on 64 DSP slices, 6.5 GMAC/s measured. `sw/npu/npu_ref.py` is its bit-exact model.
+- **Card memory.** The AC701's 1 GiB DDR3 SODIMM behind AMD's memory controller (MIG): 5.9 GB/s inside the card, sixteen times what the link carries.
+- **Host software.** `fpga-npu` (`sw/driver/`), a small kernel driver that owns the device, a 32 MiB DMA arena and the MSI; a user-space runtime (`sw/npu/npu.c`) that builds commands and reads completions in the mapped arena; `npu-test` and `npu-mnist` on top. `npu-ctl` remains the bring-up tool for registers.
+- **Debug.** System ILAs with AXI protocol checkers on both sides of the memory interconnect and on the bridge's host-memory port, a VIO, a JTAG-to-AXI master and DMA counters in BAR0; see [debugging](docs/debugging.md).
 
 ![Vivado Hardware Manager showing the MIG-side System ILA: decoded AXI read transactions, 512-bit read data beats with OKAY responses, and a protocol checker count of zero](docs/images/hardware-manager-ila.png)
 
@@ -42,15 +46,15 @@ You need Vivado 2025.2 (the free Standard edition covers the Artix-7 200T). From
 
 ```sh
 make bitstream      # build/npu_top.bit and build/npu_top.mcs (SPI flash image)
-make sim            # register-block testbench in XSim; prints RESULT: PASS
+make sim            # the XSim testbenches (registers, bandwidth engine, queue and GEMM); each prints RESULT: PASS
 make tools          # npu-ctl for this machine
 make tools CC=aarch64-linux-gnu-gcc   # npu-ctl for the i.MX95
 make project        # a Vivado project in build/vivado_project, to explore in the GUI
 ```
 
-From a clean clone `make bitstream` takes about 5 minutes on an 8-core machine, 2 once the IP cores are cached in `build/ip/`. It stops with an error if timing is not met; reports land in `build/reports/`. If Vivado runs in a container on your machine, set `XRUN` to the command prefix that runs a program inside it (see the [Makefile](Makefile)).
+From a clean clone `make bitstream` takes about 20 minutes on an 8-core machine. It stops with an error if timing is not met; reports land in `build/reports/`. If Vivado runs in a container on your machine, set `XRUN` to the command prefix that runs a program inside it (see the [Makefile](Makefile)).
 
-Then follow [hardware setup](docs/hardware-setup.md) to connect the boards and [bring-up](docs/bringup.md) to flash the card and test the link from the i.MX95.
+The host side: `sw/driver/` builds `fpga_npu.ko` against the i.MX95's kernel tree, `make -C sw/npu` builds the runtime, `npu-test` and `npu-mnist` (natively on the board, or with `CC=aarch64-linux-gnu-gcc`), and `sw/mnist/train.py` trains and quantizes the MNIST network (NumPy). Then follow [hardware setup](docs/hardware-setup.md) to connect the boards and [bring-up](docs/bringup.md) to flash the card and run the tests from the i.MX95.
 
 ## Repository layout
 
@@ -66,8 +70,8 @@ Then follow [hardware setup](docs/hardware-setup.md) to connect the boards and [
 | `sw/mnist/` | `train.py`: trains and quantizes the MNIST network the card runs. |
 | `sw/tools/` | `npu-ctl`, the bring-up tool; `cacheprobe`, a check for stale CPU cache lines after card-to-host DMA. |
 | `sw/scripts/`, `sw/patches/` | Phases 1 and 2: loading AMD's XDMA driver at boot on the FRDM-i.MX95, and the fix for its IOMMU bug (see [bring-up](docs/bringup.md)). |
-| `docs/` | Background, hardware setup, bring-up, debugging, register map. |
-| `site/` | The [explainer website](https://edgaralejod.github.io/fpga-edge-npu/) (GitHub Pages, `make site-publish`): interactive system map, animated data flows, measured numbers. |
+| `docs/` | Background, hardware setup, bring-up, debugging, register map, command queue; `docs/results/` holds the raw logs of the hardware runs. |
+| `site/` | The [explainer website](https://edgaralejod.github.io/fpga-edge-npu/) (GitHub Pages, `make site-publish`): draw a digit and run the card's network in the browser, one inference timed by the card, interactive system map, animated data flows, measured numbers. |
 
 The repository holds only source and settings. AMD IP (the PCIe bridge, MIG, SmartConnects and debug cores, all in the block design) is generated at build time from `hw/bd/card_sys.tcl`, never committed.
 

@@ -38,7 +38,7 @@ Run one Vivado at a time per directory: Vivado's `.Xil/Vivado-<pid>-<host>` temp
 | Pins, configuration | `hw/constr/ac701.xdc`, `hw/constr/debug.xdc` | `docs/hardware-setup.md` |
 | Build flow | `hw/scripts/*.tcl`, `Makefile` | `README.md`, this file |
 | Host tool | `sw/tools/npu-ctl.c` | `docs/bringup.md` |
-| i.MX95 setup | `sw/scripts/imx95-load-xdma.sh`, `sw/scripts/npu-card.service` | `docs/bringup.md` |
+| i.MX95 setup | `sw/driver/fpga-npu.service` (0.4.0 and later); `sw/scripts/imx95-load-xdma.sh`, `sw/scripts/npu-card.service` (XDMA-era cards, 0.3.x and earlier) | `docs/bringup.md` |
 
 ## Rules
 

@@ -164,7 +164,7 @@ module tb_npu_regs;
     repeat (2) @(posedge clk);
 
     axil_read(32'h000, v); check("ID",      v, 32'h4E50_5530);
-    axil_read(32'h004, v); check("VERSION", v, 32'h0000_0400);
+    axil_read(32'h004, v); check("VERSION", v, 32'h0000_0500);
     axil_read(32'h008, v); check("BUILD",   v, 32'h2611_0315);
     axil_read(32'h00C, v); check("CAPS",    v, 32'h0400_000F);
     axil_read(32'h018, v); check("STATUS, DDR not calibrated", v, 32'h0000_0005);
@@ -249,7 +249,7 @@ module tb_npu_regs;
     // Back-to-back reads with RREADY held high between them, as XDMA does.
     rready_idle = 1'b1; rready <= 1'b1;
     axil_read(32'h000, v); check("RREADY idle high: ID",      v, 32'h4E50_5530);
-    axil_read(32'h004, v); check("RREADY idle high: VERSION", v, 32'h0000_0400);
+    axil_read(32'h004, v); check("RREADY idle high: VERSION", v, 32'h0000_0500);
     axil_read(32'h000, v); check("RREADY idle high: ID again", v, 32'h4E50_5530);
     rready_idle = 1'b0; rready <= 1'b0;
 

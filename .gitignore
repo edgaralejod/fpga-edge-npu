@@ -39,3 +39,10 @@ modules.order
 *.swp
 *~
 .DS_Store
+
+# Python
+__pycache__/
+
+# Built on the i.MX95
+sw/npu/npu-test
+sw/npu/npu-mnist
