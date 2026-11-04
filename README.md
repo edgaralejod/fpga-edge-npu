@@ -10,6 +10,10 @@ Created by **Edgar Duarte**. Published by **Virtu Services LLC**. Engineering co
 
 [Architecture](ARCHITECTURE.md) · [Roadmap](ROADMAP.md) · [How edge-AI cards work](docs/edge-ai-accelerators.md) · [Hardware setup](docs/hardware-setup.md) · [Bring-up](docs/bringup.md) · [Debugging](docs/debugging.md) · [Register map](docs/register-map.md) · [Contribute](CONTRIBUTING.md)
 
+![The FRDM-i.MX95 on the left, joined by a flat riser cable to the PCIe edge connector of the AC701 on the right](docs/images/bench-setup.jpg)
+
+*The bench: the FRDM-i.MX95 host (left) drives the AC701 card (right) over PCIe Gen2 x1, through an M.2 Key-M to PCIe x4 riser cable into the AC701's edge connector. Each board runs from its own supply.*
+
 ## What it is today
 
 ```
@@ -27,6 +31,10 @@ Created by **Edgar Duarte**. Published by **Virtu Services LLC**. Engineering co
 - **Data plane (BAR1).** XDMA's scatter-gather DMA engine moves buffers between host memory and the card's 1 GiB DDR3 SODIMM, through AMD's memory controller (MIG), the place where weights and tensors will later live. Phase 1 used 64 KiB of block RAM.
 - **Debug.** System ILAs with AXI protocol checkers on both sides of the memory interconnect, a VIO, a JTAG-to-AXI master and DMA counters in BAR0; see [debugging](docs/debugging.md).
 - **Host tool.** `npu-ctl` reads and writes registers, tests the scratch register, measures BAR0 read latency, runs a DMA loopback with throughput figures, and tests all of card memory. It cross-compiles for the i.MX95 (aarch64).
+
+![Vivado Hardware Manager showing the MIG-side System ILA: decoded AXI read transactions, 512-bit read data beats with OKAY responses, and a protocol checker count of zero](docs/images/hardware-manager-ila.png)
+
+*Inside the card: the System ILA on the DDR3 controller's AXI port, in Vivado's Hardware Manager. Triggered on `ARVALID`, it shows two read transactions arriving at the memory controller, their 512-bit data beats with `OKAY` responses, and no AXI protocol checker assertions. [Debugging](docs/debugging.md) explains how to capture this.*
 
 ## Build
 

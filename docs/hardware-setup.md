@@ -32,6 +32,10 @@ On the build machine, the Digilent JTAG appears as `0403:6010` and also creates 
 
 ## Connecting
 
+![The FRDM-i.MX95 on the left, joined by a flat riser cable to the PCIe edge connector of the AC701 on the right](images/bench-setup.jpg)
+
+*The FRDM-i.MX95 (left) with the riser's M.2 end in its Key-M socket; the flat cable runs to the riser's PCIe slot, which holds the AC701's x4 edge connector (right). The AC701 sits on an antistatic bag on its own 12 V supply.*
+
 1. Remove any SSD or AI module from the FRDM-i.MX95's M.2 Key-M socket and fit the adapter's M.2 end.
 2. Plug the AC701's edge connector into the adapter's slot. Support the AC701 so the cable is not carrying its weight.
 3. Power the AC701 from its own 12 V supply, not from the adapter. Both boards must share a ground. The adapter cable's ground pins do this, but check continuity between the two boards' ground test points with a meter before powering up.
@@ -53,4 +57,4 @@ If you reload the FPGA over JTAG while the i.MX95 is running, the link drops. Re
 
 Checked on hardware, 2026-11-04: JTAG programming and flash boot. The configuration settings in `hw/constr/ac701.xdc` (`CFGBVS VCCO`, `CONFIG_VOLTAGE 3.3`) match UG952, which puts bank 0 on `FPGA_3V3`, and the FPGA reads its CFGBVS pin as 1.
 
-Not yet checked: the adapter choice and the ground and power arrangement with the FRDM-i.MX95. The [bring-up](bringup.md) checklist records results as they come in.
+Checked on hardware, 2026-11-04: the riser and the power arrangement in the photo above (each board on its own supply, grounds joined through the riser cable). The link trains at Gen2 x1 and DMA of 1 GiB passes in both directions; see [bring-up](bringup.md).

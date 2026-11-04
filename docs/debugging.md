@@ -60,3 +60,7 @@ Open the project (`make project`, then `fpga vivado 2025.2 /projects/fpga-edge-n
 4. Set a trigger, for example `ARVALID == 1` on the MIG side, Run Trigger, and start the transfer from the host (`npu-ctl dmatest 4096 1`) or from `make jtag-memtest`.
 
 Capture qualification is enabled on both ILAs, so storing only cycles with a valid handshake stretches the window over longer transfers.
+
+![Vivado Hardware Manager showing the MIG-side System ILA: decoded AXI read transactions, 512-bit read data beats with OKAY responses, and a protocol checker count of zero](images/hardware-manager-ila.png)
+
+*A capture from the MIG-side ILA (`hw_ila_2`, `card_mem/system_ila_1`), 2026-11-04. The trigger is `ARVALID == 1` on `sc_M00_AXI`, the SmartConnect's port into the MIG. The interface row decodes two read transactions; the R channel shows their 512-bit `RDATA` beats with `RRESP = OKAY`; the AW, W and B channels are idle; and the protocol checker's assertion count (`Checker Assert`) is 0. The hardware tree on the left lists every debug core: `hw_axi_1` (JTAG-to-AXI), `hw_ila_1` and `hw_ila_2`, and `hw_vio_1`.*
