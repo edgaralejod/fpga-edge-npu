@@ -1,6 +1,6 @@
 # Command queue (phase 3 design)
 
-Status: design, not built yet. This document is the contract between the card's queue engine (`npu_cq`, RTL) and the project's Linux driver (`fpga-npu`). Change both together.
+Status: the queue engine (`hw/rtl/npu_cq.v`) is written and passes its testbench (`hw/sim/tb_npu_cq.v`); it is not in the bitstream yet, and the driver is not written. This document is the contract between the engine and the project's Linux driver (`fpga-npu`). Change both together.
 
 ## Why a queue
 
@@ -29,6 +29,8 @@ flowchart LR
 | Completions and copied data | card writes host memory | `npu_cq` → bridge AXI slave → PCIe memory writes |
 | Card memory | card reads and writes | `npu_cq` → SmartConnect → MIG |
 | Interrupts | card to host | `npu_cq` → bridge MSI request |
+
+PERST# does not reach the bridge directly: AMD's reference design (PG055) feeds it to a `proc_sys_reset` block (`aux_reset_in`, active low) with the bridge's `mmcm_lock` on `dcm_locked`, whose `interconnect_aresetn` drives the bridge's `axi_aresetn`. The bridge's BAR0 side is a full AXI4 master, so an AXI4 to AXI4-Lite converter sits in front of `npu_regs`. MSI requests are one-cycle pulses answered by a one-cycle grant; `npu_cq` keeps one request in flight.
 
 The bridge's slave window maps AXI addresses `0x8000_0000`–`0xFFFF_FFFF` to PCIe bus addresses `0x0000_0000`–`0x7FFF_FFFF`, a fixed translation. The driver restricts its DMA mask to 31 bits so every buffer the IOMMU maps for the card falls inside that window.
 
@@ -113,5 +115,5 @@ The settings registers (`CQ_ENTRIES_LOG2`, the base addresses) ignore writes whi
 | --- | --- |
 | Commands fetched one at a time or in bursts? | Start with one 64-byte read per command; measure; fetch several when the doorbell shows a backlog. |
 | Interrupt per command or coalesced? | Per command when `flags[0]` is set; the host sets it on the last command of a batch. Add a timer-based coalescer if the host spends its time in the interrupt handler. |
-| Copies through the 64-bit bridge, or wider? | The bridge's AXI side is 64 bits wide; at the 125 MHz expected for Gen2 x1 (to be confirmed from the generated core) that is 1 GB/s, above the 500 MB/s the link carries, so the bridge would not be the limit. |
+| Copies through the 64-bit bridge, or wider? | The bridge's AXI side is 64 bits at 125 MHz for Gen2 x1 (PG055, and AMD's IP script for `axi_aclk_out`): 1 GB/s, above the 500 MB/s the link carries, so the bridge is not the limit. In simulation `npu_cq` moves a 32 KiB copy in 4414 cycles for 4096 beats, 93 % of one beat per cycle. |
 | Fixed or programmable translation window? | Fixed (`0x8000_0000` → bus address 0, 2 GiB) with a 31-bit DMA mask; to be confirmed against PG055 and on hardware. The bridge can also expose its translation registers (`INCLUDE_BAROFFSET_REG`) if the i.MX95's IOMMU hands out addresses above 2 GiB. |

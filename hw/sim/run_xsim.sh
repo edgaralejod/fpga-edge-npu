@@ -9,8 +9,10 @@ mkdir -p "$work" && cd "$work"
 # Every module written for this project except the top level, which needs the
 # generated AMD IP.
 rtl=$(ls "$repo"/hw/rtl/*.v | grep -v '/npu_top\.v$')
+# Shared simulation models (hw/sim/*_model.v) are compiled with every testbench.
 # shellcheck disable=SC2086
-xvlog --nolog $rtl "$repo/hw/sim/$tb.v" > xvlog.out
+models=$(ls "$repo"/hw/sim/*_model.v 2>/dev/null || true)
+xvlog --nolog $rtl $models "$repo/hw/sim/$tb.v" > xvlog.out
 xelab --nolog --debug off "$tb" -s "$tb" > xelab.out
 xsim --nolog "$tb" -R | tee xsim.out | grep -E '^(ok|FAIL|RESULT)'
 grep -q '^RESULT: PASS' xsim.out

@@ -21,7 +21,7 @@
 XRUN    ?=
 VIVADO  ?= vivado
 BUILD   := build
-TESTS   := tb_npu_regs tb_mem_bw
+TESTS   := tb_npu_regs tb_mem_bw tb_npu_cq
 
 bitstream:
 	mkdir -p $(BUILD)

@@ -57,6 +57,7 @@ flowchart LR
 
 | Level | How | Where |
 | --- | --- | --- |
+| Command queue engine | `tb_npu_cq`: the testbench plays the driver against two AXI memory models (host and card) with random stalls, read latency and slaves that wait for write data; NOPs in order across ring wraps, a full CQ stalling, copy round trips byte for byte, rejected commands, AXI errors, MSIs. A phase-bit mutant fails it. | `hw/sim/tb_npu_cq.v`, `hw/sim/axi_mem_model.v` |
 | Register block | Self-checking XSim testbench: identity, byte strobes, channel ordering, read-only behavior, counter coherence, interrupt handshake, back-to-back reads with RREADY held high as XDMA does, and an AXI handshake-order monitor. | `hw/sim/tb_npu_regs.v`, `make sim` |
 | Full design | Timing closure and DRC on every build. | `build/reports/` |
 | Memory system on hardware | JTAG-only DDR3 test (`make jtag-memtest`), host `npu-ctl memtest` over the full 1 GiB, AXI protocol checkers in the System ILAs. | [Debugging](docs/debugging.md), [bring-up](docs/bringup.md) |
