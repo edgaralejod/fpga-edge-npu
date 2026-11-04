@@ -15,8 +15,9 @@ The host side targets embedded Linux on an NXP i.MX95, the class of host that di
 | Physical link | AC701 x4 edge connector, M.2 Key-M adapter, FRDM-i.MX95 PCIe 3.0 x1 | Trains at Gen2 x1; the slower end sets the speed. |
 | PCIe endpoint | XDMA (AMD PG195), `hw/scripts/ip.tcl` | Configuration space, BARs, MSI, the DMA engine. Generated at build time, never edited. |
 | Control plane | `hw/rtl/npu_regs.v` on BAR0 | Every host-visible control and status bit of the card. Single-beat AXI-Lite, 125 MHz, on AMD's AXI4-Lite slave template (`hw/scripts/axil_template.tcl` regenerates it). [Register map](docs/register-map.md). |
-| Data plane | XDMA H2C/C2H channels to an AXI BRAM controller | Bulk data between host memory and card memory. Phase 1: 64 KiB BRAM at AXI address 0. |
-| Top level | `hw/rtl/npu_top.v` | Wires the parts; owns clocks, resets and LEDs. No logic of its own beyond the heartbeat. |
+| Data plane | XDMA H2C/C2H channels into the `card_mem` block design (`hw/bd/card_mem.tcl`): SmartConnect, MIG, DDR3 SODIMM | Bulk data between host memory and card memory: 1 GiB of DDR3 at AXI address 0 (800 MT/s, 64 bits). SmartConnect converts XDMA's 64-bit, 125 MHz AXI to the MIG's 512-bit, 100 MHz port. Phase 1 used 64 KiB of BRAM. |
+| Top level | `hw/rtl/npu_top.v` | Wires the parts; owns clocks, resets and LEDs, including the debug clock. No logic of its own beyond the heartbeat and the DMA counters (`axi_dma_mon`). |
+| Debug | System ILAs, VIO and JTAG-to-AXI in `card_mem`; DMA counters and DDR status in BAR0 | Every memory-system problem can be seen from the host's registers, from Vivado over JTAG, or as AXI waveforms. [Debugging](docs/debugging.md). |
 | Host driver | Xilinx `dma_ip_drivers` XDMA, unmodified | Owns BAR1 and the descriptor rings; exposes `/dev/xdma0_*`. |
 | Host tool | `sw/tools/npu-ctl.c` | Bring-up and measurement: registers, latency, DMA loopback. Not the runtime. |
 
@@ -43,7 +44,11 @@ flowchart LR
 
 **Bitstream in SPI flash.** The host enumerates PCIe once at boot, and expects the card ready within about 100 ms of releasing PERST#. The card configures itself from flash at power-on, compressed to shorten configuration time, and is powered before the host.
 
-**Non-project Tcl builds.** `hw/scripts/build.tcl` runs synthesis to bitstream from source and settings alone, so a clean clone builds with one command and the repository holds no generated files. Timing failure stops the build.
+**Non-project Tcl builds.** `hw/scripts/build.tcl` runs synthesis to bitstream from source and settings alone, so a clean clone builds with one command and the repository holds no generated files. Timing failure stops the build. `hw/scripts/create_project.tcl` makes a Vivado project from the same sources for exploring in the GUI; it is disposable.
+
+**A block design only for the memory system.** The MIG, SmartConnect, System ILA and their board-preset automation work best in IP Integrator, so `card_mem` is a block design, recreated by `hw/bd/card_mem.tcl` whenever that script changes. Everything written for this project stays in Verilog.
+
+**Debug cores on their own clock.** The debug hub and VIO run from the board's Si570 oscillator through an MMCM, not from the PCIe or MIG clocks, so the Hardware Manager can still reach them when there is no host or the memory controller is in reset.
 
 ## Verification
 
@@ -51,6 +56,7 @@ flowchart LR
 | --- | --- | --- |
 | Register block | Self-checking XSim testbench: identity, byte strobes, channel ordering, read-only behavior, counter coherence, interrupt handshake, back-to-back reads with RREADY held high as XDMA does, and an AXI handshake-order monitor. | `hw/sim/tb_npu_regs.v`, `make sim` |
 | Full design | Timing closure and DRC on every build. | `build/reports/` |
+| Memory system on hardware | JTAG-only DDR3 test (`make jtag-memtest`), host `npu-ctl memtest` over the full 1 GiB, AXI protocol checkers in the System ILAs. | [Debugging](docs/debugging.md), [bring-up](docs/bringup.md) |
 | Hardware | Bring-up checklist, filled in with dated results. | [docs/bringup.md](docs/bringup.md) |
 
 The XDMA example simulation is not part of the flow: it exceeds the instance limit of Vivado's free simulator tier. The project's own blocks are kept small enough to test in XSim, and the PCIe path is tested on hardware.

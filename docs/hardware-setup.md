@@ -24,6 +24,9 @@ From UG952 v1.4.
 | Power | SW15, 12 V into J49; DS22 lit when on | Use the supplied 12 V adapter. An ATX 6-pin plug has a different pinout and damages the board. |
 | DONE LED | DS10 | Lit once the FPGA is configured. |
 | PCIe lane size | J12, default pins 3–4 (x4) | Leave as is. |
+| CPU_RESET | SW8, active high | Resets the DDR3 controller (MIG), which then recalibrates. |
+| User clock | Si570 U34, 156.25 MHz at power-up, pins M21/M22 | Clocks the debug cores (divided to 78.125 MHz). Do not reprogram it over I2C while debugging. |
+| DDR3 | SODIMM J1, Micron MT8JTF12864HZ-1G6 (1 GiB) | Card memory since phase 2; the MIG runs it at 800 MT/s from the 200 MHz system clock (R3/P3). |
 
 On the build machine, the Digilent JTAG appears as `0403:6010` and also creates two `/dev/ttyUSB*` nodes through `ftdi_sio`; the CP2103 UART is the third.
 

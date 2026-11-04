@@ -3,7 +3,8 @@
 # Only this script is kept in git: the generated IP output is AMD's and is
 # rebuilt from these settings on every build.
 #
-# Usage (from build.tcl): source ip.tcl after setting ::ip_dir.
+# Usage (from build.tcl or create_project.tcl): source ip.tcl after setting
+# ::ip_dir; set ::ip_synth 0 to skip out-of-context synthesis.
 
 # --- PCIe DMA/Bridge Subsystem (XDMA) ----------------------------------------
 # Gen2 x1: the FRDM-i.MX95 M.2 Key-M slot is a single PCIe 3.0 lane, and the
@@ -45,34 +46,13 @@ set_property -dict [list \
   CONFIG.pf0_class_code             {120000} \
 ] [get_ips xdma_0]
 
-# --- On-card test memory -------------------------------------------------------
-# 64 KiB of block RAM behind XDMA's AXI4 master. Phase 1 uses it as the DMA
-# loopback target; later phases replace it with the DDR3 controller (MIG).
-create_ip -name axi_bram_ctrl -vendor xilinx.com -library ip -module_name axi_bram_ctrl_0 -dir $::ip_dir
-set_property -dict [list \
-  CONFIG.PROTOCOL        {AXI4} \
-  CONFIG.DATA_WIDTH      {64} \
-  CONFIG.ID_WIDTH        {4} \
-  CONFIG.MEM_DEPTH       {8192} \
-  CONFIG.SINGLE_PORT_BRAM {1} \
-  CONFIG.ECC_TYPE        {0} \
-] [get_ips axi_bram_ctrl_0]
-
-create_ip -name blk_mem_gen -vendor xilinx.com -library ip -module_name dma_bram_0 -dir $::ip_dir
-set_property -dict [list \
-  CONFIG.Memory_Type                 {Single_Port_RAM} \
-  CONFIG.Use_BRAM_Block              {BRAM_Controller} \
-  CONFIG.Write_Width_A               {64} \
-  CONFIG.Read_Width_A                {64} \
-  CONFIG.Write_Depth_A               {8192} \
-  CONFIG.Enable_32bit_Address        {true} \
-  CONFIG.Use_Byte_Write_Enable       {true} \
-  CONFIG.Byte_Size                   {8} \
-  CONFIG.Register_PortA_Output_of_Memory_Primitives {false} \
-  CONFIG.Use_RSTA_Pin                {true} \
-] [get_ips dma_bram_0]
+# Card memory (the DDR3 controller and its interconnect and debug cores) is
+# the block design in hw/bd/card_mem.tcl.
 
 set ips [get_ips]
 generate_target {instantiation_template synthesis} $ips
-# Out-of-context synthesis; the checkpoints are reused by later builds.
-foreach ip $ips { synth_ip $ip }
+# Out-of-context synthesis for the non-project build; the checkpoints are
+# reused by later builds. A Vivado project (create_project.tcl) runs its own.
+if {![info exists ::ip_synth] || $::ip_synth} {
+  foreach ip $ips { synth_ip $ip }
+}

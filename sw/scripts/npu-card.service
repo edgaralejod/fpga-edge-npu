@@ -1,0 +1,21 @@
+# systemd unit for the FRDM-i.MX95: at every boot, put the card's IOMMU group
+# in pass-through and load the XDMA driver (sw/scripts/imx95-load-xdma.sh).
+#
+# Install on the i.MX95, with the script and xdma.ko in /root:
+#   cp npu-card.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now npu-card.service
+#
+# If the card is absent (the AC701 was powered after the i.MX95), the unit
+# fails with "no 10ee:7021 device" and the boot carries on.
+
+[Unit]
+Description=fpga-edge-npu: IOMMU pass-through and XDMA driver for the AC701 card
+After=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh /root/imx95-load-xdma.sh /root/xdma.ko
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

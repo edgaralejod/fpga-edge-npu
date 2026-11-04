@@ -3,8 +3,8 @@
 // Covers: identity reads, scratch write/read with byte strobes, AW-before-W
 // and W-before-AW ordering, read-only registers ignoring writes, the coherent
 // 64-bit cycle counter, the interrupt request/ack handshake, and unmapped
-// reads, back-to-back reads with RREADY held high (as XDMA does), and an AXI
-// protocol monitor. Prints "RESULT: PASS" or "RESULT: FAIL".
+// reads, the DDR status and DMA counter inputs, back-to-back reads with RREADY
+// held high (as XDMA does), and an AXI protocol monitor. Prints "RESULT: PASS" or "RESULT: FAIL".
 
 `timescale 1ns / 1ps
 `default_nettype none
@@ -22,18 +22,22 @@ module tb_npu_regs;
   wire [1:0]  bresp, rresp;
   wire [31:0] rdata;
   reg         link_up = 1'b1;
+  reg         ddr_calib_done = 1'b0, ddr_mmcm_locked = 1'b1;
+  reg  [31:0] dma_writes = 32'h0000_1234, dma_reads = 32'h0000_5678, dma_errors = 32'd0;
   reg         irq_ack = 1'b0;
   wire [1:0]  user_led;
   wire        irq_req;
 
-  npu_regs #(.BUILD_ID(32'h2611_0315), .CARD_MEM_KIB(16'd64)) dut (
+  npu_regs #(.BUILD_ID(32'h2611_0315), .CARD_MEM_MIB(16'd1024)) dut (
     .clk(clk), .rst_n(rst_n),
     .s_axil_awaddr(awaddr), .s_axil_awvalid(awvalid), .s_axil_awready(awready),
     .s_axil_wdata(wdata), .s_axil_wstrb(wstrb), .s_axil_wvalid(wvalid), .s_axil_wready(wready),
     .s_axil_bresp(bresp), .s_axil_bvalid(bvalid), .s_axil_bready(bready),
     .s_axil_araddr(araddr), .s_axil_arvalid(arvalid), .s_axil_arready(arready),
     .s_axil_rdata(rdata), .s_axil_rresp(rresp), .s_axil_rvalid(rvalid), .s_axil_rready(rready),
-    .link_up(link_up), .user_led(user_led), .irq_req(irq_req), .irq_ack(irq_ack)
+    .link_up(link_up), .ddr_calib_done(ddr_calib_done), .ddr_mmcm_locked(ddr_mmcm_locked),
+    .dma_writes(dma_writes), .dma_reads(dma_reads), .dma_errors(dma_errors),
+    .user_led(user_led), .irq_req(irq_req), .irq_ack(irq_ack)
   );
 
   integer errors = 0;
@@ -132,10 +136,17 @@ module tb_npu_regs;
     repeat (2) @(posedge clk);
 
     axil_read(32'h000, v); check("ID",      v, 32'h4E50_5530);
-    axil_read(32'h004, v); check("VERSION", v, 32'h0000_0101);
+    axil_read(32'h004, v); check("VERSION", v, 32'h0000_0200);
     axil_read(32'h008, v); check("BUILD",   v, 32'h2611_0315);
-    axil_read(32'h00C, v); check("CAPS",    v, 32'h0040_0001);
-    axil_read(32'h018, v); check("STATUS",  v, 32'h0000_0001);
+    axil_read(32'h00C, v); check("CAPS",    v, 32'h0400_0003);
+    axil_read(32'h018, v); check("STATUS, DDR not calibrated", v, 32'h0000_0005);
+    ddr_calib_done = 1'b1;
+    repeat (3) @(posedge clk);
+    axil_read(32'h018, v); check("STATUS, DDR calibrated", v, 32'h0000_0007);
+    axil_read(32'h030, v); check("DMA_WRITES", v, 32'h0000_1234);
+    axil_read(32'h034, v); check("DMA_READS",  v, 32'h0000_5678);
+    dma_errors = 32'd2;
+    axil_read(32'h038, v); check("DMA_ERRORS", v, 32'h0000_0002);
 
     axil_write(32'h010, 32'hA5A5_1234, 4'hF, 0);
     axil_read(32'h010, v); check("SCRATCH full write", v, 32'hA5A5_1234);
@@ -172,7 +183,7 @@ module tb_npu_regs;
     // Back-to-back reads with RREADY held high between them, as XDMA does.
     rready_idle = 1'b1; rready <= 1'b1;
     axil_read(32'h000, v); check("RREADY idle high: ID",      v, 32'h4E50_5530);
-    axil_read(32'h004, v); check("RREADY idle high: VERSION", v, 32'h0000_0101);
+    axil_read(32'h004, v); check("RREADY idle high: VERSION", v, 32'h0000_0200);
     axil_read(32'h000, v); check("RREADY idle high: ID again", v, 32'h4E50_5530);
     rready_idle = 1'b0; rready <= 1'b0;
 

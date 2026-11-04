@@ -1,4 +1,6 @@
-# Bring-up: phase 1, PCIe link
+# Bring-up
+
+Phase 1 (PCIe link) is sections 1 to 4 and its checklist; phase 2 (DDR3 card memory) follows.
 
 This is the procedure for getting the FRDM-i.MX95 and the AC701 talking, and the record of what has been checked. Connect the boards first ([hardware setup](hardware-setup.md)).
 
@@ -74,6 +76,15 @@ sudo ./npu-ctl info                            # now through /dev/xdma0_user
 sudo ./npu-ctl dmatest 65536 100
 ```
 
+The pass-through setting and the driver are lost at every reboot. To have systemd run the script at boot, install `sw/scripts/npu-card.service` (instructions in the file); with the script and `xdma.ko` in `/root`:
+
+```sh
+sudo cp npu-card.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now npu-card.service
+```
+
+Installed on the FRDM-i.MX95 on 2026-11-04. If the AC701 was not powered first, the unit fails with "no 10ee:7021 device" and the rest of the boot is unaffected.
+
 To check the interrupt path, wait for user interrupt 0 and raise it from the `IRQ` register:
 
 ```sh
@@ -119,6 +130,56 @@ The 8-byte case puts the fixed cost per transfer at about 40 µs. Larger transfe
 | XDMA driver loads on the i.MX95 kernel | Device nodes created | Pass, 2026-11-04 (dma_ip_drivers `a918c51`, cross-compiled; BAR0 user, BAR1 config, 1 H2C + 1 C2H channel, MSI enabled) |
 | `npu-ctl dmatest 65536 100` | PASS; record both directions | Pass, 2026-11-04, with IOMMU pass-through (10 000 loops of 64 KiB, 0 errors; 291.8 MB/s host to card, 289.7 MB/s card to host). Fails with the IOMMU translating; see below |
 | MSI from `IRQ` register reaches the driver | Interrupt count rises | Pass, 2026-11-04 (`/dev/xdma0_events_0` returned 1; MSI count 30206 to 30207; `IRQ` read `0x3`) |
+
+## Phase 2: DDR3 card memory
+
+The card memory is now the AC701's 1 GiB DDR3 SODIMM behind the MIG, in the `card_mem` block design. Build and flash as in section 1; `make bitstream` also writes `build/npu_top.ltx`, the probe names for the debug cores ([debugging](debugging.md)).
+
+Check the memory over JTAG first, with or without the host:
+
+```sh
+make ddr-status   XRUN="fpga run 2025.2 --"   # ddr calibrated 1, ddr mmcm locked 1
+make jtag-memtest XRUN="fpga run 2025.2 --"   # every address line, five patterns
+make ddr-reset    XRUN="fpga run 2025.2 --"   # MIG reset from the VIO, then recalibration
+```
+
+Then from the i.MX95, after a reboot (the FPGA was reconfigured) and `sw/scripts/imx95-load-xdma.sh`:
+
+```sh
+sudo ./npu-ctl info                  # version 0.2.0, 1048576 KiB DDR3, ddr calibrated
+sudo ./npu-ctl dmatest 4194304 100
+sudo ./npu-ctl dmatest 1048576 20 0x3FF00000   # the top MiB of the DDR3
+sudo ./npu-ctl memtest               # all 1 GiB: write everything, then read and check
+```
+
+`memtest` writes every 64-bit word with a value derived from its address and a per-run seed before reading any back, so a broken address line shows up as data from another address.
+
+Measured 2026-11-04 (same setup as phase 1, bitstream build `26110417`, IOMMU pass-through):
+
+| Transfer | Host to card | Card to host |
+| --- | --- | --- |
+| 4 KiB | 77.5 MB/s | 80.2 MB/s |
+| 64 KiB | 292.9 MB/s | 291.4 MB/s |
+| 1 MiB | 342.4 MB/s | 339.0 MB/s |
+| 4 MiB | 368.8 MB/s | 332.5 MB/s |
+| 16 MiB | 371.0 MB/s | 325.4 MB/s |
+
+Large transfers reach about 74 % of the 500 MB/s Gen2 x1 carries per direction. `memtest` itself reports about 200 MB/s, because generating and checking the pattern on the Cortex-A55 takes about half its time.
+
+### Phase 2 checklist
+
+| Check | Expected | Result |
+| --- | --- | --- |
+| Bitstream with MIG, SmartConnect and debug cores meets timing | WNS ≥ 0, WHS ≥ 0 | Pass, 2026-11-04 (WNS +0.251 ns, WHS +0.017 ns; 34 % of LUTs, 21 % of block RAM, 3 of 10 MMCMs) |
+| `npu_regs` 0.2.0 testbench | `RESULT: PASS` | Pass, 2026-11-04 |
+| DDR3 calibrates | VIO and STATUS: calibrated, locked | Pass, 2026-11-04, first power-up |
+| Debug cores reachable over JTAG | 2 ILAs, 1 JTAG-AXI master, VIO | Pass, 2026-11-04 (`hw_ila_1`, `hw_ila_2`, `hw_axi_1`) |
+| `make jtag-memtest` | PASS | Pass, 2026-11-04 (29 addresses x 5 patterns, 0 errors) |
+| MIG reset from the VIO | Recalibrates | Pass, 2026-11-04 |
+| Flash boot, enumeration, link | Gen2 x1, `10ee:7021` | Pass, 2026-11-04 |
+| `npu-ctl dmatest` up to 16 MiB, and at the top of the DDR3 | PASS | Pass, 2026-11-04, 0 AXI error responses |
+| `npu-ctl memtest` over 1 GiB | PASS | Pass, 2026-11-04, twice (4 MiB and 1 MiB chunks, different seeds) |
+| Card-side DDR3 bandwidth (counter-based, from inside the FPGA) | Measured | Not run: needs the card-side traffic engine |
 
 ## Problems found
 

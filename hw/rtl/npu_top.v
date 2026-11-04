@@ -2,11 +2,15 @@
 //
 //   PCIe Gen2 x1 (edge connector) -> XDMA
 //     BAR0  AXI-Lite master -> npu_regs        (control and status)
-//     BAR1  XDMA DMA engine -> AXI4 master -> card memory (64 KiB BRAM)
+//     BAR1  XDMA DMA engine -> AXI4 master -> card_mem: DDR3 SODIMM, 1 GiB
 //
-// Phase 1 of the roadmap: the host can enumerate the card, read and write
-// registers, raise an MSI, and DMA buffers to and from card memory. The
-// inference engine attaches here in later phases.
+// card_mem is a block design (hw/bd/card_mem.tcl): the MIG DDR3 controller,
+// a SmartConnect shared with a JTAG-to-AXI master, System ILAs with AXI
+// protocol checkers on both sides, and a VIO. The debug cores run from the
+// board's Si570 user clock (divided to 78.125 MHz), so Vivado's Hardware
+// Manager reaches them with no PCIe host and with the MIG in reset.
+//
+// Roadmap phase 2. The inference engine attaches here in later phases.
 //
 // LEDs (GPIO_LED_0..3): 0 = link up, 1 = PCIe user-clock heartbeat (~1 Hz),
 // 2..3 = software controlled through npu_regs CONTROL.
@@ -17,14 +21,38 @@
 module npu_top #(
   parameter [31:0] BUILD_ID = 32'h0000_0000
 ) (
-  input  wire       pcie_refclk_p,
-  input  wire       pcie_refclk_n,
-  input  wire       pcie_perst_n,
-  output wire [0:0] pcie_txp,
-  output wire [0:0] pcie_txn,
-  input  wire [0:0] pcie_rxp,
-  input  wire [0:0] pcie_rxn,
-  output wire [3:0] led
+  input  wire        pcie_refclk_p,
+  input  wire        pcie_refclk_n,
+  input  wire        pcie_perst_n,
+  output wire [0:0]  pcie_txp,
+  output wire [0:0]  pcie_txn,
+  input  wire [0:0]  pcie_rxp,
+  input  wire [0:0]  pcie_rxn,
+
+  // DDR3 SODIMM and its 200 MHz system clock (pins from the MIG board preset)
+  input  wire        sys_clk_p,
+  input  wire        sys_clk_n,
+  output wire [13:0] ddr3_addr,
+  output wire [2:0]  ddr3_ba,
+  output wire        ddr3_cas_n,
+  output wire [0:0]  ddr3_ck_n,
+  output wire [0:0]  ddr3_ck_p,
+  output wire [0:0]  ddr3_cke,
+  output wire [0:0]  ddr3_cs_n,
+  output wire [7:0]  ddr3_dm,
+  inout  wire [63:0] ddr3_dq,
+  inout  wire [7:0]  ddr3_dqs_n,
+  inout  wire [7:0]  ddr3_dqs_p,
+  output wire [0:0]  ddr3_odt,
+  output wire        ddr3_ras_n,
+  output wire        ddr3_reset_n,
+  output wire        ddr3_we_n,
+
+  input  wire        user_clk_p,  // Si570, 156.25 MHz at power-up: debug clock
+  input  wire        user_clk_n,
+  input  wire        cpu_reset,   // CPU_RESET pushbutton, active high: resets the MIG
+
+  output wire [3:0]  led
 );
 
   // 100 MHz PCIe reference clock from the host, through the edge connector.
@@ -113,7 +141,7 @@ module npu_top #(
 
   npu_regs #(
     .BUILD_ID     (BUILD_ID),
-    .CARD_MEM_KIB (16'd64)
+    .CARD_MEM_MIB (16'd1024)
   ) regs (
     .clk            (axi_aclk),
     .rst_n          (axi_aresetn),
@@ -134,55 +162,81 @@ module npu_top #(
     .s_axil_rresp   (m_axil_rresp),
     .s_axil_rvalid  (m_axil_rvalid),
     .s_axil_rready  (m_axil_rready),
-    .link_up        (user_lnk_up),
+    .link_up         (user_lnk_up),
+    .ddr_calib_done  (ddr_calib_done),
+    .ddr_mmcm_locked (ddr_mmcm_locked),
+    .dma_writes      (dma_writes),
+    .dma_reads       (dma_reads),
+    .dma_errors      (dma_errors),
     .user_led       (user_led),
     .irq_req        (usr_irq_req),
     .irq_ack        (usr_irq_ack)
   );
 
   // ---------------------------------------------------------------------------
-  // Card memory: 64 KiB BRAM on the DMA path. Only the low 16 address bits are
-  // decoded, so the 64 KiB window repeats across the AXI address space.
-  wire        bram_rst, bram_clk, bram_en;
-  wire [7:0]  bram_we;
-  wire [15:0] bram_addr;
-  wire [63:0] bram_wrdata, bram_rddata;
+  // Free-running debug clock for the VIO and the debug hub: the Si570's
+  // 156.25 MHz divided to 78.125 MHz. At the full rate the hub side of the
+  // 512-bit MIG ILA, spread across the device, missed timing on routing alone.
+  wire user_clk_ibuf, dbg_clk_mmcm, dbg_fb, dbg_clk;
+  IBUFDS user_clk_buf (.I(user_clk_p), .IB(user_clk_n), .O(user_clk_ibuf));
+  MMCME2_BASE #(
+    .CLKIN1_PERIOD    (6.400),
+    .CLKFBOUT_MULT_F  (6.000),   // VCO 937.5 MHz
+    .CLKOUT0_DIVIDE_F (12.000)   // 78.125 MHz
+  ) dbg_mmcm (
+    .CLKIN1 (user_clk_ibuf), .CLKFBIN (dbg_fb), .CLKFBOUT (dbg_fb),
+    .CLKOUT0 (dbg_clk_mmcm), .RST (1'b0), .PWRDWN (1'b0),
+    .CLKFBOUTB (), .CLKOUT0B (), .CLKOUT1 (), .CLKOUT1B (), .CLKOUT2 (), .CLKOUT2B (),
+    .CLKOUT3 (), .CLKOUT3B (), .CLKOUT4 (), .CLKOUT5 (), .CLKOUT6 (), .LOCKED ()
+  );
+  BUFG dbg_clk_bufg (.I(dbg_clk_mmcm), .O(dbg_clk));
 
-  axi_bram_ctrl_0 card_mem_ctrl (
-    .s_axi_aclk    (axi_aclk),
-    .s_axi_aresetn (axi_aresetn),
-    .s_axi_awid    (m_axi_awid),    .s_axi_awaddr (m_axi_awaddr[15:0]), .s_axi_awlen  (m_axi_awlen),
-    .s_axi_awsize  (m_axi_awsize),  .s_axi_awburst(m_axi_awburst),      .s_axi_awlock (m_axi_awlock),
-    .s_axi_awcache (m_axi_awcache), .s_axi_awprot (m_axi_awprot),
-    .s_axi_awvalid (m_axi_awvalid), .s_axi_awready(m_axi_awready),
-    .s_axi_wdata   (m_axi_wdata),   .s_axi_wstrb  (m_axi_wstrb),        .s_axi_wlast  (m_axi_wlast),
-    .s_axi_wvalid  (m_axi_wvalid),  .s_axi_wready (m_axi_wready),
-    .s_axi_bid     (m_axi_bid),     .s_axi_bresp  (m_axi_bresp),
-    .s_axi_bvalid  (m_axi_bvalid),  .s_axi_bready (m_axi_bready),
-    .s_axi_arid    (m_axi_arid),    .s_axi_araddr (m_axi_araddr[15:0]), .s_axi_arlen  (m_axi_arlen),
-    .s_axi_arsize  (m_axi_arsize),  .s_axi_arburst(m_axi_arburst),      .s_axi_arlock (m_axi_arlock),
-    .s_axi_arcache (m_axi_arcache), .s_axi_arprot (m_axi_arprot),
-    .s_axi_arvalid (m_axi_arvalid), .s_axi_arready(m_axi_arready),
-    .s_axi_rid     (m_axi_rid),     .s_axi_rdata  (m_axi_rdata),        .s_axi_rresp  (m_axi_rresp),
-    .s_axi_rlast   (m_axi_rlast),   .s_axi_rvalid (m_axi_rvalid),       .s_axi_rready (m_axi_rready),
-    .bram_rst_a    (bram_rst),
-    .bram_clk_a    (bram_clk),
-    .bram_en_a     (bram_en),
-    .bram_we_a     (bram_we),
-    .bram_addr_a   (bram_addr),
-    .bram_wrdata_a (bram_wrdata),
-    .bram_rddata_a (bram_rddata)
+  // ---------------------------------------------------------------------------
+  // Card memory: DDR3 through the card_mem block design.
+  wire ddr_calib_done, ddr_mmcm_locked;
+
+  card_mem card_mem (
+    .pcie_aclk    (axi_aclk),
+    .pcie_aresetn (axi_aresetn),
+    .S_AXI_PCIE_awid    (m_axi_awid),    .S_AXI_PCIE_awaddr  (m_axi_awaddr),  .S_AXI_PCIE_awlen   (m_axi_awlen),
+    .S_AXI_PCIE_awsize  (m_axi_awsize),  .S_AXI_PCIE_awburst (m_axi_awburst), .S_AXI_PCIE_awlock  (m_axi_awlock),
+    .S_AXI_PCIE_awcache (m_axi_awcache), .S_AXI_PCIE_awprot  (m_axi_awprot),  .S_AXI_PCIE_awqos   (4'd0),
+    .S_AXI_PCIE_awvalid (m_axi_awvalid), .S_AXI_PCIE_awready (m_axi_awready),
+    .S_AXI_PCIE_wdata   (m_axi_wdata),   .S_AXI_PCIE_wstrb   (m_axi_wstrb),   .S_AXI_PCIE_wlast   (m_axi_wlast),
+    .S_AXI_PCIE_wvalid  (m_axi_wvalid),  .S_AXI_PCIE_wready  (m_axi_wready),
+    .S_AXI_PCIE_bid     (m_axi_bid),     .S_AXI_PCIE_bresp   (m_axi_bresp),
+    .S_AXI_PCIE_bvalid  (m_axi_bvalid),  .S_AXI_PCIE_bready  (m_axi_bready),
+    .S_AXI_PCIE_arid    (m_axi_arid),    .S_AXI_PCIE_araddr  (m_axi_araddr),  .S_AXI_PCIE_arlen   (m_axi_arlen),
+    .S_AXI_PCIE_arsize  (m_axi_arsize),  .S_AXI_PCIE_arburst (m_axi_arburst), .S_AXI_PCIE_arlock  (m_axi_arlock),
+    .S_AXI_PCIE_arcache (m_axi_arcache), .S_AXI_PCIE_arprot  (m_axi_arprot),  .S_AXI_PCIE_arqos   (4'd0),
+    .S_AXI_PCIE_arvalid (m_axi_arvalid), .S_AXI_PCIE_arready (m_axi_arready),
+    .S_AXI_PCIE_rid     (m_axi_rid),     .S_AXI_PCIE_rdata   (m_axi_rdata),   .S_AXI_PCIE_rresp   (m_axi_rresp),
+    .S_AXI_PCIE_rlast   (m_axi_rlast),   .S_AXI_PCIE_rvalid  (m_axi_rvalid),  .S_AXI_PCIE_rready  (m_axi_rready),
+    .sys_diff_clock_clk_p (sys_clk_p),
+    .sys_diff_clock_clk_n (sys_clk_n),
+    .ddr3_sdram_addr    (ddr3_addr),    .ddr3_sdram_ba      (ddr3_ba),
+    .ddr3_sdram_cas_n   (ddr3_cas_n),   .ddr3_sdram_ras_n   (ddr3_ras_n),   .ddr3_sdram_we_n (ddr3_we_n),
+    .ddr3_sdram_ck_p    (ddr3_ck_p),    .ddr3_sdram_ck_n    (ddr3_ck_n),
+    .ddr3_sdram_cke     (ddr3_cke),     .ddr3_sdram_cs_n    (ddr3_cs_n),    .ddr3_sdram_odt  (ddr3_odt),
+    .ddr3_sdram_dm      (ddr3_dm),      .ddr3_sdram_dq      (ddr3_dq),
+    .ddr3_sdram_dqs_p   (ddr3_dqs_p),   .ddr3_sdram_dqs_n   (ddr3_dqs_n),
+    .ddr3_sdram_reset_n (ddr3_reset_n),
+    .dbg_clk         (dbg_clk),
+    .ddr_rst         (cpu_reset),
+    .ddr_calib_done  (ddr_calib_done),
+    .ddr_mmcm_locked (ddr_mmcm_locked)
   );
 
-  dma_bram_0 card_mem (
-    .clka      (bram_clk),
-    .rsta      (bram_rst),
-    .ena       (bram_en),
-    .wea       (bram_we),
-    .addra     ({16'd0, bram_addr}),
-    .dina      (bram_wrdata),
-    .douta     (bram_rddata),
-    .rsta_busy ()
+  // DMA traffic counters for npu_regs.
+  wire [31:0] dma_writes, dma_reads, dma_errors;
+
+  axi_dma_mon dma_mon (
+    .clk     (axi_aclk),      .rst_n   (axi_aresetn),
+    .awvalid (m_axi_awvalid), .awready (m_axi_awready),
+    .arvalid (m_axi_arvalid), .arready (m_axi_arready),
+    .bvalid  (m_axi_bvalid),  .bready  (m_axi_bready),  .bresp (m_axi_bresp),
+    .rvalid  (m_axi_rvalid),  .rready  (m_axi_rready),  .rresp (m_axi_rresp),
+    .writes  (dma_writes),    .reads   (dma_reads),     .errors (dma_errors)
   );
 
   // ---------------------------------------------------------------------------

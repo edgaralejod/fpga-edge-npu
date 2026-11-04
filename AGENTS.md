@@ -17,6 +17,8 @@ make tools       # npu-ctl; add CC=aarch64-linux-gnu-gcc for the i.MX95
 make program     # load the bitstream over JTAG
 make flash       # write the SPI flash over JTAG
 make status      # mode pins and DONE over JTAG; read-only
+make ddr-status  # DDR3 calibration over JTAG (VIO); also ddr-reset, jtag-memtest
+make project     # Vivado project in build/vivado_project for the GUI; disposable
 ```
 
 Run one Vivado at a time per directory: Vivado's `.Xil/Vivado-<pid>-<host>` temporary directories collide between containers that reuse PIDs. `build.tcl` works inside `build/` for this reason.
@@ -28,10 +30,12 @@ Run one Vivado at a time per directory: Vivado's `.Xil/Vivado-<pid>-<host>` temp
 | Registers | `hw/rtl/npu_regs.v` | `docs/register-map.md`, `hw/sim/tb_npu_regs.v`, `sw/tools/npu-ctl.c` |
 | Top level, clocks, LEDs | `hw/rtl/npu_top.v` | `docs/register-map.md` (LEDs), `ARCHITECTURE.md` |
 | PCIe or IP settings | `hw/scripts/ip.tcl` | `docs/register-map.md` (PCIe identity), `ARCHITECTURE.md` |
-| Pins, configuration | `hw/constr/ac701.xdc` | `docs/hardware-setup.md` |
+| Memory system, debug cores | `hw/bd/card_mem.tcl` | `docs/debugging.md`, `ARCHITECTURE.md`, `npu_top` port list |
+| JTAG debug scripts | `hw/scripts/debug.tcl` | `docs/debugging.md`, `Makefile` |
+| Pins, configuration | `hw/constr/ac701.xdc`, `hw/constr/debug.xdc` | `docs/hardware-setup.md` |
 | Build flow | `hw/scripts/*.tcl`, `Makefile` | `README.md`, this file |
 | Host tool | `sw/tools/npu-ctl.c` | `docs/bringup.md` |
-| i.MX95 setup | `sw/scripts/imx95-load-xdma.sh` | `docs/bringup.md` |
+| i.MX95 setup | `sw/scripts/imx95-load-xdma.sh`, `sw/scripts/npu-card.service` | `docs/bringup.md` |
 
 ## Rules
 

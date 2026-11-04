@@ -6,7 +6,10 @@
 //   npu-ctl led   <0..3>            set the two software LEDs
 //   npu-ctl regtest [count]         scratch-register pattern test
 //   npu-ctl latency [count]         BAR0 read round-trip time
-//   npu-ctl dmatest [bytes] [loops] DMA loopback through card memory
+//   npu-ctl dmatest [bytes] [loops] [card offset]
+//                                   DMA loopback through card memory
+//   npu-ctl memtest [chunk bytes]   write all of card memory, then read it all
+//                                   back and check it (address-dependent data)
 //
 // BAR0 is reached through the Xilinx XDMA driver's /dev/xdma0_user when it is
 // loaded, otherwise through sysfs (resource0 of the first 10ee:7021 device,
@@ -41,6 +44,9 @@
 #define REG_STATUS   0x018
 #define REG_CYCLE_LO 0x020
 #define REG_CYCLE_HI 0x024
+#define REG_DMA_WR   0x030
+#define REG_DMA_RD   0x034
+#define REG_DMA_ERR  0x038
 
 #define NPU_ID_VALUE  0x4E505530u /* "NPU0" */
 #define CARD_CLOCK_HZ 125000000.0
@@ -124,14 +130,49 @@ static uint64_t cycles(void) {
   return ((uint64_t)rd(REG_CYCLE_HI) << 32) | lo;
 }
 
+// Version 0.2 and later: DDR3 status bits, DMA counters, CAPS size in MiB.
+static int has_ddr(void) { return (rd(REG_VERSION) & 0xffff00) >= 0x000200; }
+
+static uint64_t card_mem_bytes(void) {
+  uint64_t n = rd(REG_CAPS) >> 16;
+  return has_ddr() ? n << 20 : n << 10; // 0.1.x reported KiB
+}
+
 static int cmd_info(void) {
-  uint32_t ver = rd(REG_VERSION), caps = rd(REG_CAPS);
+  uint32_t ver = rd(REG_VERSION), caps = rd(REG_CAPS), st = rd(REG_STATUS);
   printf("id        0x%08x %s\n", rd(REG_ID), rd(REG_ID) == NPU_ID_VALUE ? "(NPU0)" : "(unexpected)");
   printf("version   %u.%u.%u\n", (ver >> 16) & 0xff, (ver >> 8) & 0xff, ver & 0xff);
   printf("build     %08x\n", rd(REG_BUILD));
-  printf("caps      0x%08x (card memory %u KiB, dma %s)\n", caps, caps >> 16, (caps & 1) ? "yes" : "no");
-  printf("status    link %s\n", (rd(REG_STATUS) & 1) ? "up" : "down");
+  printf("caps      0x%08x (card memory %" PRIu64 " KiB%s, dma %s)\n", caps, card_mem_bytes() >> 10,
+         (has_ddr() && (caps & 2)) ? " DDR3" : "", (caps & 1) ? "yes" : "no");
+  printf("status    link %s", (st & 1) ? "up" : "down");
+  if (has_ddr())
+    printf(", ddr %s, ddr clock %s", (st & 2) ? "calibrated" : "NOT calibrated", (st & 4) ? "locked" : "NOT locked");
+  printf("\n");
+  if (has_ddr())
+    printf("dma axi   %u writes, %u reads, %u error responses\n", rd(REG_DMA_WR), rd(REG_DMA_RD), rd(REG_DMA_ERR));
   printf("uptime    %.3f s\n", cycles() / CARD_CLOCK_HZ);
+  return 0;
+}
+
+// DMA tests are meaningless before the memory controller has calibrated.
+static int require_memory(void) {
+  if (has_ddr() && !(rd(REG_STATUS) & 2)) {
+    fprintf(stderr, "npu-ctl: DDR3 not calibrated (STATUS 0x%08x); see npu-ctl info\n", rd(REG_STATUS));
+    return -1;
+  }
+  return 0;
+}
+
+static int open_dma(int *h2c, int *c2h) {
+  const char *h2c_path = getenv("NPU_H2C") ? getenv("NPU_H2C") : "/dev/xdma0_h2c_0";
+  const char *c2h_path = getenv("NPU_C2H") ? getenv("NPU_C2H") : "/dev/xdma0_c2h_0";
+  *h2c = open(h2c_path, O_WRONLY);
+  *c2h = open(c2h_path, O_RDONLY);
+  if (*h2c < 0 || *c2h < 0) {
+    fprintf(stderr, "npu-ctl: open %s / %s: %s (is the xdma driver loaded?)\n", h2c_path, c2h_path, strerror(errno));
+    return -1;
+  }
   return 0;
 }
 
@@ -159,19 +200,14 @@ static int cmd_latency(long count) {
   return 0;
 }
 
-static int cmd_dmatest(size_t bytes, int loops) {
-  const char *h2c_path = getenv("NPU_H2C") ? getenv("NPU_H2C") : "/dev/xdma0_h2c_0";
-  const char *c2h_path = getenv("NPU_C2H") ? getenv("NPU_C2H") : "/dev/xdma0_c2h_0";
-  uint32_t mem = (rd(REG_CAPS) >> 16) * 1024u;
-  if (bytes == 0 || bytes > mem || bytes % 8) {
-    fprintf(stderr, "npu-ctl: bytes must be a multiple of 8 and at most %u\n", mem);
+static int cmd_dmatest(size_t bytes, int loops, uint64_t off) {
+  uint64_t mem = card_mem_bytes();
+  if (bytes == 0 || bytes % 8 || off % 8 || off + bytes > mem) {
+    fprintf(stderr, "npu-ctl: bytes and offset must be multiples of 8, within %" PRIu64 " bytes of card memory\n", mem);
     return 1;
   }
-  int h2c = open(h2c_path, O_WRONLY), c2h = open(c2h_path, O_RDONLY);
-  if (h2c < 0 || c2h < 0) {
-    fprintf(stderr, "npu-ctl: open %s / %s: %s (is the xdma driver loaded?)\n", h2c_path, c2h_path, strerror(errno));
-    return 1;
-  }
+  int h2c, c2h;
+  if (require_memory() || open_dma(&h2c, &c2h)) return 1;
   uint8_t *tx, *rx;
   if (posix_memalign((void **)&tx, 4096, bytes) || posix_memalign((void **)&rx, 4096, bytes)) return 1;
   double t_h2c = 0, t_c2h = 0;
@@ -180,9 +216,9 @@ static int cmd_dmatest(size_t bytes, int loops) {
     for (size_t i = 0; i < bytes; i++) tx[i] = (uint8_t)(i * 7 + l * 13);
     memset(rx, 0, bytes);
     double t0 = now_s();
-    if (pwrite(h2c, tx, bytes, 0) != (ssize_t)bytes) { perror("h2c pwrite"); return 1; }
+    if (pwrite(h2c, tx, bytes, off) != (ssize_t)bytes) { perror("h2c pwrite"); return 1; }
     double t1 = now_s();
-    if (pread(c2h, rx, bytes, 0) != (ssize_t)bytes) { perror("c2h pread"); return 1; }
+    if (pread(c2h, rx, bytes, off) != (ssize_t)bytes) { perror("c2h pread"); return 1; }
     double t2 = now_s();
     t_h2c += t1 - t0;
     t_c2h += t2 - t1;
@@ -204,10 +240,60 @@ static int cmd_dmatest(size_t bytes, int loops) {
   return errors ? 1 : 0;
 }
 
+// Pattern word for card address a: every 64-bit word differs, and a stuck or
+// shorted address line shows up as data from another address.
+static uint64_t pattern(uint64_t a, uint64_t seed) {
+  uint64_t z = a + seed * 0x9E3779B97F4A7C15ull;
+  z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+  z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+  return z ^ (z >> 31);
+}
+
+static int cmd_memtest(size_t chunk) {
+  uint64_t mem = card_mem_bytes();
+  if (chunk == 0 || chunk % 8 || mem % chunk) {
+    fprintf(stderr, "npu-ctl: chunk must be a multiple of 8 that divides %" PRIu64 "\n", mem);
+    return 1;
+  }
+  int h2c, c2h;
+  if (require_memory() || open_dma(&h2c, &c2h)) return 1;
+  uint64_t *buf;
+  if (posix_memalign((void **)&buf, 4096, chunk)) return 1;
+  uint64_t seed = (uint64_t)time(NULL), bad = 0, first_bad = 0;
+  uint32_t err0 = has_ddr() ? rd(REG_DMA_ERR) : 0;
+
+  double t0 = now_s();
+  for (uint64_t off = 0; off < mem; off += chunk) {
+    for (size_t i = 0; i < chunk / 8; i++) buf[i] = pattern(off + i * 8, seed);
+    if (pwrite(h2c, buf, chunk, off) != (ssize_t)chunk) { perror("h2c pwrite"); return 1; }
+  }
+  double t1 = now_s();
+  for (uint64_t off = 0; off < mem; off += chunk) {
+    if (pread(c2h, buf, chunk, off) != (ssize_t)chunk) { perror("c2h pread"); return 1; }
+    for (size_t i = 0; i < chunk / 8; i++) {
+      uint64_t want = pattern(off + i * 8, seed);
+      if (buf[i] != want) {
+        if (bad++ == 0) {
+          first_bad = off + i * 8;
+          fprintf(stderr, "memtest   first mismatch at card address 0x%" PRIx64 ": wrote 0x%016" PRIx64 ", read 0x%016" PRIx64 "\n",
+                  first_bad, want, buf[i]);
+        }
+      }
+    }
+  }
+  double t2 = now_s();
+  uint32_t errs = has_ddr() ? rd(REG_DMA_ERR) - err0 : 0;
+  printf("memtest   %" PRIu64 " MiB in %zu KiB chunks: write %.1f MB/s, read %.1f MB/s, %" PRIu64 " bad words, %u AXI errors: %s\n",
+         mem >> 20, chunk >> 10, mem / 1e6 / (t1 - t0), mem / 1e6 / (t2 - t1), bad, errs,
+         (bad || errs) ? "FAIL" : "PASS");
+  return (bad || errs) ? 1 : 0;
+}
+
 static void usage(void) {
   fprintf(stderr,
           "usage: npu-ctl info | read <off> | write <off> <val> | led <0..3> |\n"
-          "               regtest [count] | latency [count] | dmatest [bytes] [loops]\n");
+          "               regtest [count] | latency [count] | dmatest [bytes] [loops] [offset] |\n"
+          "               memtest [chunk bytes]\n");
 }
 
 int main(int argc, char **argv) {
@@ -228,7 +314,9 @@ int main(int argc, char **argv) {
   if (!strcmp(cmd, "regtest")) return cmd_regtest(argc > 2 ? strtol(argv[2], NULL, 0) : 100000);
   if (!strcmp(cmd, "latency")) return cmd_latency(argc > 2 ? strtol(argv[2], NULL, 0) : 100000);
   if (!strcmp(cmd, "dmatest"))
-    return cmd_dmatest(argc > 2 ? strtoul(argv[2], NULL, 0) : 65536, argc > 3 ? atoi(argv[3]) : 100);
+    return cmd_dmatest(argc > 2 ? strtoul(argv[2], NULL, 0) : 65536, argc > 3 ? atoi(argv[3]) : 100,
+                       argc > 4 ? strtoull(argv[4], NULL, 0) : 0);
+  if (!strcmp(cmd, "memtest")) return cmd_memtest(argc > 2 ? strtoul(argv[2], NULL, 0) : 4u << 20);
   usage();
   return 2;
 }
