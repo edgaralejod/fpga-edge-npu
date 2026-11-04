@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Inside a PCIe AI accelerator · fpga-edge-npu</title>
-  <meta name="description" content="How a discrete edge-AI accelerator works, from the CPU through the IOMMU and the PCIe link into the card's memory, built on an FPGA and measured on real hardware.">
+  <meta name="description" content="How a discrete edge-AI accelerator works, from the CPU through the IOMMU and the PCIe link into the card's memory and INT8 engine, built on an FPGA and measured on real hardware. Draw a digit and run the card's network in your browser.">
   <meta property="og:title" content="Inside a PCIe AI accelerator">
   <meta property="og:description" content="An open FPGA accelerator card driven by an NXP i.MX95, explained part by part with real latencies, bandwidths and debug captures.">
   <meta property="og:image" content="img/bench-setup.jpg">
@@ -18,6 +18,8 @@
     <div class="wrap top-row">
       <a class="brand" href="#top"><span class="dot"></span>fpga-edge-npu</a>
       <nav>
+        <a href="#try">Try it</a>
+        <a href="#trace-sec">Timed</a>
         <a href="#system">System</a>
         <a href="#flows">Data flow</a>
         <a href="#numbers">Numbers</a>
@@ -33,7 +35,7 @@
     <section class="hero wrap">
       <p class="eyebrow">An open accelerator, measured on real hardware</p>
       <h1>Inside a PCIe AI accelerator</h1>
-      <p class="lede">Hailo-8 and NXP's Ara-2 are cards an embedded CPU hands work to over PCIe. This project builds one in the open, on an AMD Artix-7 FPGA driven by an NXP i.MX95, and follows every byte from the CPU through the IOMMU and the PCIe link into the card's memory. Every number on this page was measured on the bench below, or is derived from one that was.</p>
+      <p class="lede">Hailo-8 and NXP's Ara-2 are cards an embedded CPU hands work to over PCIe. This project builds one in the open, on an AMD Artix-7 FPGA driven by an NXP i.MX95, and follows every byte from the CPU through the IOMMU and the PCIe link into the card's memory and its matrix engine, which now runs a small neural network. Every number on this page was measured on the bench below, or is derived from one that was.</p>
       <div class="stats" id="hero-stats"></div>
       <figure class="photo">
         <img src="img/bench-setup.jpg" alt="The FRDM-i.MX95 on the left, joined by a flat riser cable to the PCIe edge connector of the AC701 FPGA board on the right" width="1600" height="1200" loading="eager">
@@ -41,9 +43,46 @@
       </figure>
     </section>
 
+    <section id="try" class="band">
+      <div class="wrap">
+        <p class="eyebrow">00 · Try it</p>
+        <h2>Draw a digit. Your browser runs the card's network, bit for bit.</h2>
+        <p class="sub">This is the network the card runs: the same INT8 weights file and the same integer arithmetic as the card's GEMM engine, right down to the rounding. On all 10 000 MNIST test images it makes exactly the same predictions as the card. Below the answer are the four commands the i.MX95 writes into the card's queue to get the same answer from the FPGA.</p>
+        <div class="demo loading" id="demo">
+          <div class="pad-col">
+            <canvas id="pad" width="280" height="280" aria-label="Drawing pad: draw a digit with the mouse, a finger or a pen"></canvas>
+            <div class="pad-btns"><button class="btn" id="pad-sample">Test image</button><button class="btn ghost" id="pad-clear">Clear</button></div>
+          </div>
+          <div class="layers">
+            <figure class="layer"><canvas id="viz-x" class="pix" width="28" height="28"></canvas>
+              <figcaption><b>Input</b> 784 INT8 values, pixel ÷ 2 (0 to 127), padded to K = 832</figcaption></figure>
+            <span class="op-arrow" aria-hidden="true">GEMM<br><small>× W₁ + b₁<br>× 57505 &gt;&gt; 27<br>ReLU</small></span>
+            <figure class="layer"><canvas id="viz-h" class="pix" width="16" height="8"></canvas>
+              <figcaption><b>Hidden</b> 128 INT8 activations<br><span id="viz-h-note"></span></figcaption></figure>
+            <span class="op-arrow" aria-hidden="true">GEMM<br><small>× W₂ + b₂<br>INT32 out</small></span>
+            <figure class="layer logits-fig"><ol class="logits" id="logits"></ol>
+              <figcaption><b>Logits</b> 10 INT32 scores; the largest (bold) wins</figcaption></figure>
+          </div>
+          <div class="answer"><span class="pred" id="pred">?</span><p id="pred-note"></p></div>
+        </div>
+        <div class="cmd-card">
+          <h3>What the host submits for one image</h3>
+          <p class="chart-note">Four 64-byte entries in the submission queue, then one write to the <code>SQ_TAIL</code> doorbell. The card fetches them over PCIe, runs them in order, and writes a 16-byte completion for each. Words are 64-bit, shown as hex; select one to see its fields. Layouts: <a href="https://github.com/edgaralejod/fpga-edge-npu/blob/main/docs/command-queue.md">command-queue.md</a>.</p>
+          <ol class="cmds" id="cmds"></ol>
+        </div>
+      </div>
+    </section>
+
+    <section id="trace-sec" class="wrap">
+      <p class="eyebrow">01 · One inference, timed</p>
+      <h2>Where the microseconds go when the card answers</h2>
+      <p class="sub">The same four commands, run on the card for one test image and drawn as a logic analyzer would: the host's clock for the CPU, the card's own 125 MHz cycle counter for everything inside the FPGA, from the timestamps in each completion record.</p>
+      <div class="trace-card"><div id="trace" class="chart"></div><p class="chart-note" id="trace-note"></p></div>
+    </section>
+
     <section id="system" class="band">
       <div class="wrap">
-        <p class="eyebrow">01 · The system</p>
+        <p class="eyebrow">02 · The system</p>
         <h2>Every part between the CPU and the card's memory</h2>
         <p class="sub">Select a block to see what it does, what it measured, and what went wrong there during bring-up.</p>
         <div class="system">
@@ -54,8 +93,8 @@
     </section>
 
     <section id="flows" class="wrap">
-      <p class="eyebrow">02 · Data flow</p>
-      <h2>Four journeys through the system</h2>
+      <p class="eyebrow">03 · Data flow</p>
+      <h2>Five journeys through the system</h2>
       <p class="sub">Pick one and watch it move. The steps below follow the packet; the times are the bench's.</p>
       <div class="flows">
         <div class="flow-tabs" role="tablist" id="flow-tabs"></div>
@@ -73,9 +112,15 @@
 
     <section id="numbers" class="band">
       <div class="wrap">
-        <p class="eyebrow">03 · Numbers</p>
+        <p class="eyebrow">04 · Numbers</p>
         <h2>Where the time goes, and how fast each path is</h2>
         <p class="sub">Tags say where each number comes from: <span class="tag measured">measured</span> on the bench, <span class="tag derived">derived</span> from measurements, or <span class="tag spec">spec</span> from a standard or datasheet.</p>
+
+        <div class="chart-card" id="chart-mnist">
+          <div class="chart-head"><h3>MNIST, all 10 000 test images: images per second</h3><button class="toggle" data-target="chart-mnist">Table</button></div>
+          <p class="chart-note">The same network, the same answers on all three, bit for bit. The first engine lost to one CPU core; holding 8 images on chip so each weight read does 8 times the work made it 4 times faster than the core.</p>
+          <div class="chart"></div><div class="table-view" hidden></div>
+        </div>
 
         <div class="chart-card" id="chart-time">
           <div class="chart-head"><h3>From one clock tick to one gigabyte</h3><button class="toggle" data-target="chart-time">Table</button></div>
@@ -85,22 +130,22 @@
 
         <div class="chart-card" id="chart-bw">
           <div class="chart-head"><h3>Measured bandwidth against each path's limit</h3><button class="toggle" data-target="chart-bw">Table</button></div>
-          <p class="chart-note">Bars are measured; the gray track is the limit for that path. The card's own memory is about sixteen times faster than the link that feeds it.</p>
+          <p class="chart-note">Bars are measured; the gray track is the limit for that path. The card's own memory is about fourteen times faster than the link that feeds it.</p>
           <div class="chart"></div><div class="table-view" hidden></div>
         </div>
 
         <div class="chart-card" id="chart-size">
-          <div class="chart-head"><h3>DMA throughput against transfer size</h3><button class="toggle" data-target="chart-size">Table</button></div>
-          <p class="chart-note">Each transfer pays about 40 µs of fixed cost, so small transfers waste the link. Above about 1 MiB the link itself is the limit.</p>
+          <div class="chart-head"><h3>XDMA throughput against transfer size (phase 2)</h3><button class="toggle" data-target="chart-size">Table</button></div>
+          <p class="chart-note">Through AMD's XDMA driver each transfer paid about 40 µs of fixed cost, so small transfers wasted the link; above about 1 MiB the link itself was the limit. Since phase 3 the card fetches commands itself: a copy costs one 3.8 µs command.</p>
           <div class="chart"></div><div class="table-view" hidden></div>
         </div>
       </div>
     </section>
 
     <section id="debug" class="wrap">
-      <p class="eyebrow">04 · Debugging on real hardware</p>
+      <p class="eyebrow">05 · Debugging on real hardware</p>
       <h2>Instruments built into the card</h2>
-      <p class="sub">The card carries a logic analyzer on each side of its memory interconnect, a virtual control panel, and a JTAG path into DDR3, all reachable from Vivado with no host attached. Bring-up turned up three bugs, one in each layer: the card's registers, the host driver, and a card engine caught before it shipped. Each card below says how it was found.</p>
+      <p class="sub">The card carries a logic analyzer on each side of its memory interconnect, a virtual control panel, and a JTAG path into DDR3, all reachable from Vivado with no host attached. Bring-up turned up four bugs worth telling: in the card's registers, in AMD's host driver, in a card engine before it shipped, and in the GEMM engine on the card itself. Each says how it was found.</p>
       <figure class="shot">
         <img src="img/hardware-manager-ila.png" alt="Vivado Hardware Manager showing the System ILA on the DDR3 controller's AXI port: decoded read transactions, 512-bit read data beats with OKAY responses, protocol checker count zero" width="2000" height="1098" loading="lazy">
         <figcaption>The System ILA on the DDR3 controller's AXI port, triggered on <code>ARVALID</code>: two read transactions, their 512-bit data beats with <code>OKAY</code> responses, and an AXI protocol checker that counted no violations.</figcaption>
@@ -110,7 +155,7 @@
 
     <section id="compare" class="band">
       <div class="wrap">
-        <p class="eyebrow">05 · Compared</p>
+        <p class="eyebrow">06 · Compared</p>
         <h2>Where weights live decides the design</h2>
         <p class="sub">The two products this project learns from make opposite choices. The card here can play both roles at small scale.</p>
         <div class="compare" id="compare-cards"></div>
@@ -118,7 +163,7 @@
     </section>
 
     <section id="roadmap" class="wrap">
-      <p class="eyebrow">06 · Roadmap</p>
+      <p class="eyebrow">07 · Roadmap</p>
       <h2>Built in the order a real card is</h2>
       <ol class="roadmap" id="roadmap-list"></ol>
     </section>
@@ -130,5 +175,7 @@
   </footer>
 
   <script type="module" src="app.js"></script>
+  <script type="module" src="demo.js"></script>
+  <script type="module" src="trace.js"></script>
 </body>
 </html>
