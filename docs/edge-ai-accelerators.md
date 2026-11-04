@@ -33,7 +33,7 @@ The i.MX95 already has its own NPU (NXP's eIQ Neutron). A discrete card earns it
 | --- | --- | --- |
 | PCIe endpoint, BARs, MSI | XDMA core; BAR0 control registers; MSI through `usr_irq` | 1 (now) |
 | DMA engine and descriptor rings | XDMA scatter-gather DMA, driven by the Xilinx driver | 1 (now) |
-| On-card memory | 64 KiB block RAM now, 1 GB DDR3 next | 1, 2 |
+| On-card memory | 1 GiB DDR3, 5.9 GB/s read measured inside the card (phase 2) | 1, 2 |
 | Doorbells and command queue | Command ring in host memory, doorbell register, completion interrupt | 3 |
 | Compute fabric | INT8 matrix engine on the Artix-7's 740 DSP slices | 4 |
 | Compiler and model binary | Python tool: quantized model to a card program | 5 |
