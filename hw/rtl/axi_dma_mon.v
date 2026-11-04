@@ -1,6 +1,8 @@
 // axi_dma_mon: counts the DMA engine's AXI traffic toward card memory.
 //
-// Watches XDMA's AXI4 master without touching it. The counts appear in
+// Watches an AXI4 master into card memory without touching it: XDMA's in
+// phases 1 and 2, npu_cq's card port (copies and GEMM) since phase 3. The
+// counts appear in
 // npu_regs (DMA_WRITES, DMA_READS, DMA_ERRORS), so the host can tell whether
 // a DMA reached the card's memory system at all, and whether the memory
 // system answered with an error, before anyone opens the ILA.

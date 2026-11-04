@@ -31,7 +31,7 @@ if {![file exists $ip_hash_file] ||
   file delete -force $::ip_dir
   file mkdir $::ip_dir
 }
-if {[file exists $::ip_dir/xdma_0/xdma_0.xci]} {
+if {[llength [glob -nocomplain $::ip_dir/*/*.xci]]} {
   foreach xci [glob $::ip_dir/*/*.xci] { read_ip $xci }
   set ips [get_ips]
   generate_target {synthesis} $ips
@@ -44,20 +44,20 @@ if {[file exists $::ip_dir/xdma_0/xdma_0.xci]} {
 }
 # synth_ip reports failures without stopping the script; stop here instead of
 # failing later with a misleading error.
-foreach ip [get_ips] {
+foreach ip [get_ips -quiet] {
   if {![file exists [file rootname [get_property IP_FILE $ip]].dcp]} {
     error "IP $ip did not synthesize; see the synth_ip messages above"
   }
 }
 
-# Block design card_mem (DDR3, interconnect, debug cores). Recreated whenever
-# hw/bd/card_mem.tcl changes; the hash of the script that made it is kept
-# next to it.
+# Block design card_sys (PCIe bridge, DDR3, interconnect, debug cores).
+# Recreated whenever hw/bd/card_sys.tcl changes; the hash of the script that
+# made it is kept next to it.
 set ::bd_dir $build_dir/bd
-set bd_tcl   $repo/hw/bd/card_mem.tcl
-set bd_file  $::bd_dir/card_mem/card_mem.bd
+set bd_tcl   $repo/hw/bd/card_sys.tcl
+set bd_file  $::bd_dir/card_sys/card_sys.bd
 set bd_hash  [lindex [exec sha256sum $bd_tcl] 0]
-set hash_file $::bd_dir/card_mem.tcl.sha256
+set hash_file $::bd_dir/card_sys.tcl.sha256
 if {[file exists $bd_file] && [file exists $hash_file] &&
     [string trim [read [set fh [open $hash_file]]][close $fh]] eq $bd_hash} {
   read_bd $bd_file
@@ -69,8 +69,8 @@ if {[file exists $bd_file] && [file exists $hash_file] &&
 }
 # Synthesize the block design with the top level instead of out of context:
 # slower, but no project runs are needed.
-set_property synth_checkpoint_mode None [get_files card_mem.bd]
-generate_target all [get_files card_mem.bd]
+set_property synth_checkpoint_mode None [get_files card_sys.bd]
+generate_target all [get_files card_sys.bd]
 
 read_verilog [glob $repo/hw/rtl/*.v]
 read_xdc     $repo/hw/constr/ac701.xdc

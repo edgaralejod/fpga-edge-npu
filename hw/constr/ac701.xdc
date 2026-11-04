@@ -5,7 +5,7 @@
 # ac701 1.4) for the LEDs. UG952 v1.4 for the user clock and CPU_RESET.
 #
 # The DDR3 pins and the 200 MHz system clock (R3/P3) are constrained by the
-# MIG's own XDC inside the card_mem block design (AC701 board preset).
+# MIG's own XDC inside the card_sys block design (AC701 board preset).
 
 # --- PCIe ----------------------------------------------------------------------
 # Reference clock: 100 MHz from the host on the edge connector, GTP quad 213.
@@ -19,8 +19,10 @@ set_property IOSTANDARD LVCMOS33 [get_ports pcie_perst_n]
 set_property PULLUP true [get_ports pcie_perst_n]
 set_false_path -from [get_ports pcie_perst_n]
 
-# Lane 0 is placed by the XDMA core's own constraints (GTPE2_CHANNEL_X0Y7,
-# PCIE_X0Y0), which match the AC701 edge connector's lane 0.
+# Lane 0 is placed by the PCIe bridge core's own constraints (PCIE_X0Y0 and
+# its GTP channel), which must match the AC701 edge connector's lane 0
+# (GTPE2_CHANNEL_X0Y7, as placed by XDMA in phases 1 and 2); build/reports/io.rpt
+# and the placed design show where it landed.
 
 # --- LEDs ----------------------------------------------------------------------
 set_property PACKAGE_PIN M26 [get_ports {led[0]}]

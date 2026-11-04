@@ -6,7 +6,7 @@ The reference pair is an AMD **AC701** (Artix-7 200T) as the card and an NXP **F
 
 **Status: phases 1 and 2 done; phase 3 (command queue and own driver) is next.** On the FRDM-i.MX95 the card enumerates at PCIe Gen2 x1, DMA reaches about 370 MB/s host to card and 340 MB/s back, and the whole 1 GiB of card DDR3 passes write-then-verify tests from the host and from inside the FPGA. Inside the card, the DDR3 delivers 5.5 GB/s writing and 5.9 GB/s reading, 85 to 93 % of its peak. [Bring-up](docs/bringup.md) has the measurements and the problems found on the way, including a cache-maintenance bug in AMD's XDMA driver that the i.MX95's IOMMU exposed, found and patched; [debugging](docs/debugging.md) covers the ILAs, VIO and JTAG tests built into the card. There is no inference engine yet; the [roadmap](ROADMAP.md) says what comes next and when each step counts as done.
 
-Created by **Edgar Duarte**. Apache-2.0 licensed.
+Created by **Edgar Duarte**. Apache-2.0 licensed, except the Linux kernel driver in `sw/driver/`, which is GPL-2.0 as kernel modules must be.
 
 **[Interactive explainer](https://edgaralejod.github.io/fpga-edge-npu/)** · [Architecture](ARCHITECTURE.md) · [Roadmap](ROADMAP.md) · [How edge-AI cards work](docs/edge-ai-accelerators.md) · [Hardware setup](docs/hardware-setup.md) · [Bring-up](docs/bringup.md) · [Debugging](docs/debugging.md) · [Register map](docs/register-map.md) · [Command queue (design)](docs/command-queue.md) · [Contribute](CONTRIBUTING.md)
 
@@ -56,18 +56,20 @@ Then follow [hardware setup](docs/hardware-setup.md) to connect the boards and [
 
 | Path | Contents |
 | --- | --- |
-| `hw/rtl/` | Verilog written for this project: `npu_top` (AC701 top level), `npu_regs` (BAR0 registers). |
+| `hw/rtl/` | Verilog written for this project: `npu_top` (AC701 top level), `npu_regs` (BAR0 registers), `npu_cq` (command queue and DMA), `npu_mm` (INT8 matrix engine), `mem_bw` (DDR3 bandwidth engine), `axi_dma_mon`, `fifo_fwft`. |
 | `hw/constr/` | AC701 pin, clock and configuration constraints. |
-| `hw/bd/` | `card_mem.tcl`: the DDR3 memory system and debug cores as a block design. |
+| `hw/bd/` | `card_sys.tcl`: AMD's cores as a block design: PCIe bridge, DDR3 memory system, interconnect, debug cores. |
 | `hw/scripts/` | `ip.tcl` creates the AMD IP cores from settings; `build.tcl` runs synthesis to bitstream; `create_project.tcl` makes a Vivado project for the GUI; `program.tcl` loads and flashes over JTAG; `debug.tcl` checks DDR3 over JTAG; `axil_template.tcl` regenerates the AXI4-Lite template `npu_regs` is based on. |
-| `hw/sim/` | Self-checking XSim testbenches. |
-| `sw/tools/` | `npu-ctl`, the bring-up tool for the host; `cacheprobe`, a check for stale CPU cache lines after card-to-host DMA. |
-| `sw/scripts/` | `imx95-load-xdma.sh` loads the XDMA driver on the FRDM-i.MX95; `npu-card.service` runs it at boot. |
-| `sw/patches/` | `xdma-unmap-orig-nents.patch`: fixes AMD's XDMA driver for hosts with an IOMMU (see [bring-up](docs/bringup.md)). |
+| `hw/sim/` | Self-checking XSim testbenches and `axi_mem_model`, an AXI memory that checks the master's handshakes. |
+| `sw/driver/` | `fpga-npu`, the Linux kernel driver (GPL-2.0): DMA arena, BAR0, MSI. |
+| `sw/npu/` | The user-space runtime (`npu.c`), `npu-test` (acceptance tests), `npu-mnist`, and `npu_ref.py`, the bit-exact model of the GEMM engine. |
+| `sw/mnist/` | `train.py`: trains and quantizes the MNIST network the card runs. |
+| `sw/tools/` | `npu-ctl`, the bring-up tool; `cacheprobe`, a check for stale CPU cache lines after card-to-host DMA. |
+| `sw/scripts/`, `sw/patches/` | Phases 1 and 2: loading AMD's XDMA driver at boot on the FRDM-i.MX95, and the fix for its IOMMU bug (see [bring-up](docs/bringup.md)). |
 | `docs/` | Background, hardware setup, bring-up, debugging, register map. |
 | `site/` | The [explainer website](https://edgaralejod.github.io/fpga-edge-npu/) (GitHub Pages, `make site-publish`): interactive system map, animated data flows, measured numbers. |
 
-The repository holds only source and settings. AMD IP (XDMA, and the MIG, SmartConnect and debug cores in the block design) is generated at build time from `hw/scripts/ip.tcl` and `hw/bd/card_mem.tcl`, never committed.
+The repository holds only source and settings. AMD IP (the PCIe bridge, MIG, SmartConnects and debug cores, all in the block design) is generated at build time from `hw/bd/card_sys.tcl`, never committed.
 
 ## Limits
 

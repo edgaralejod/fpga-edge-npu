@@ -7,7 +7,7 @@
 #
 # The project is disposable (build/ is git-ignored): the sources of truth stay
 # in hw/. Changes made in the GUI have to be carried back into hw/scripts/ip.tcl,
-# hw/bd/card_mem.tcl, hw/rtl/ or hw/constr/ by hand. make bitstream remains the
+# hw/bd/card_sys.tcl, hw/rtl/ or hw/constr/ by hand. make bitstream remains the
 # reference build; this project builds the same design with Vivado's runs.
 
 set repo     [file normalize [file dirname [info script]]/../..]
@@ -26,16 +26,16 @@ set_property board_part      xilinx.com:ac701:part0:1.4 [current_project]
 set_property target_language Verilog [current_project]
 set_property simulator_language Verilog [current_project]
 
-# IP (XDMA) inside the project; the project synthesizes it in its own runs.
+# Standalone IP (none since phase 3; see ip.tcl), synthesized by the project's runs.
 set ::ip_dir   $proj_dir/ip
 file mkdir $::ip_dir
 set ::ip_synth 0
 source $repo/hw/scripts/ip.tcl
 
-# Block design card_mem: DDR3, interconnect, ILAs, VIO, JTAG-to-AXI.
+# Block design card_sys: PCIe bridge, DDR3, interconnect, ILAs, VIO, JTAG-to-AXI.
 set ::bd_dir $proj_dir/bd
-source $repo/hw/bd/card_mem.tcl
-generate_target all [get_files card_mem.bd]
+source $repo/hw/bd/card_sys.tcl
+generate_target all [get_files card_sys.bd]
 
 # RTL, read from the repository so edits in the GUI land in git.
 add_files -norecurse [glob $repo/hw/rtl/*.v]

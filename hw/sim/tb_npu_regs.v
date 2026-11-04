@@ -33,6 +33,18 @@ module tb_npu_regs;
   reg  [31:0] bw_runs = 32'd3, bw_cycles = 32'd1000, bw_mismatches = 32'd0, bw_errors = 32'd0;
   integer     bw_starts = 0;
   always @(posedge clk) if (bw_start) bw_starts = bw_starts + 1;
+  wire [31:0] cycles_lo;
+  wire        cq_enable, cq_irq_en, cq_sq_tail_wr, cq_cq_head_wr;
+  wire [3:0]  cq_log2;
+  wire [63:0] cq_sq_base, cq_cq_base;
+  wire [11:0] cq_doorbell;
+  reg         cq_busy = 0, cq_stalled = 1, cq_axi_err = 0, cq_cfg_err = 1;
+  reg  [31:0] cq_completed = 32'd42;
+  integer     sq_rings = 0, cq_rings = 0; reg [11:0] last_bell;
+  always @(posedge clk) begin
+    if (cq_sq_tail_wr) begin sq_rings = sq_rings + 1; last_bell = cq_doorbell; end
+    if (cq_cq_head_wr) begin cq_rings = cq_rings + 1; last_bell = cq_doorbell; end
+  end
   reg         irq_ack = 1'b0;
   wire [1:0]  user_led;
   wire        irq_req;
@@ -49,6 +61,10 @@ module tb_npu_regs;
     .bw_start(bw_start), .bw_read(bw_read), .bw_outstanding(bw_outstanding), .bw_seed(bw_seed),
     .bw_addr(bw_addr), .bw_len(bw_len), .bw_busy(bw_busy), .bw_runs(bw_runs),
     .bw_cycles(bw_cycles), .bw_mismatches(bw_mismatches), .bw_errors(bw_errors),
+    .cycles_lo(cycles_lo), .cq_enable(cq_enable), .cq_irq_en(cq_irq_en), .cq_log2(cq_log2),
+    .cq_sq_base(cq_sq_base), .cq_cq_base(cq_cq_base), .cq_sq_tail_wr(cq_sq_tail_wr), .cq_cq_head_wr(cq_cq_head_wr),
+    .cq_doorbell(cq_doorbell), .cq_busy(cq_busy), .cq_stalled(cq_stalled), .cq_axi_err(cq_axi_err),
+    .cq_cfg_err(cq_cfg_err), .cq_completed(cq_completed),
     .user_led(user_led), .irq_req(irq_req), .irq_ack(irq_ack)
   );
 
@@ -148,9 +164,9 @@ module tb_npu_regs;
     repeat (2) @(posedge clk);
 
     axil_read(32'h000, v); check("ID",      v, 32'h4E50_5530);
-    axil_read(32'h004, v); check("VERSION", v, 32'h0000_0300);
+    axil_read(32'h004, v); check("VERSION", v, 32'h0000_0400);
     axil_read(32'h008, v); check("BUILD",   v, 32'h2611_0315);
-    axil_read(32'h00C, v); check("CAPS",    v, 32'h0400_0003);
+    axil_read(32'h00C, v); check("CAPS",    v, 32'h0400_000F);
     axil_read(32'h018, v); check("STATUS, DDR not calibrated", v, 32'h0000_0005);
     ddr_calib_done = 1'b1;
     repeat (3) @(posedge clk);
@@ -212,10 +228,28 @@ module tb_npu_regs;
     axil_read(32'h050, v); check("BW_CYCLES", v, 32'd1000);
     axil_read(32'h05C, v); check("BW_CLK_KHZ", v, 32'd100000);
 
+    // Command queue registers and doorbells
+    axil_write(32'h084, 32'd6, 4'hF, 0);
+    axil_write(32'h088, 32'h0012_3000, 4'hF, 0);
+    axil_write(32'h090, 32'h0045_6000, 4'hF, 0);
+    axil_write(32'h080, 32'h0000_0003, 4'hF, 0);                 // enable, interrupts
+    check("CQ enable and irq out", {30'd0, cq_irq_en, cq_enable}, 3);
+    check("CQ log2 out", {28'd0, cq_log2}, 6);
+    check("SQ base out", cq_sq_base[31:0], 32'h0012_3000);
+    axil_write(32'h088, 32'h0000_0000, 4'hF, 0);                 // ignored while enabled
+    axil_read(32'h088, v); check("SQ base ignores writes while enabled", v, 32'h0012_3000);
+    axil_write(32'h098, 32'd5, 4'hF, 0);
+    check("SQ tail doorbell pulses once", sq_rings, 1);
+    check("doorbell value", {20'd0, last_bell}, 5);
+    axil_write(32'h09C, 32'd4, 4'hF, 0);
+    check("CQ head doorbell pulses once", cq_rings, 1);
+    axil_read(32'h0A0, v); check("CQ_STATUS (cfg_err, stalled)", v, 32'h0000_000A);
+    axil_read(32'h0A4, v); check("CQ_COMPLETED", v, 32'd42);
+
     // Back-to-back reads with RREADY held high between them, as XDMA does.
     rready_idle = 1'b1; rready <= 1'b1;
     axil_read(32'h000, v); check("RREADY idle high: ID",      v, 32'h4E50_5530);
-    axil_read(32'h004, v); check("RREADY idle high: VERSION", v, 32'h0000_0300);
+    axil_read(32'h004, v); check("RREADY idle high: VERSION", v, 32'h0000_0400);
     axil_read(32'h000, v); check("RREADY idle high: ID again", v, 32'h4E50_5530);
     rready_idle = 1'b0; rready <= 1'b0;
 

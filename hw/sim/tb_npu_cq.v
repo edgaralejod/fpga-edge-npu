@@ -53,7 +53,7 @@ module tb_npu_cq;
     .cfg_sq_base(cfg_sq_base), .cfg_cq_base(cfg_cq_base),
     .sq_tail_wr(sq_tail_wr), .sq_tail_val(sq_tail_val), .cq_head_wr(cq_head_wr), .cq_head_val(cq_head_val),
     .cycles(cycles), .busy(busy), .stalled(stalled), .axi_err(axi_err), .cfg_err(cfg_err), .completed(completed),
-    .msi_enable(msi_enable), .msi_request(msi_request), .msi_grant(msi_grant),
+    .msi_enable(msi_enable), .msi_request(msi_request), .msi_grant(msi_grant), .irq_test(1'b0),
     .h_awaddr(h_awaddr), .h_awlen(h_awlen), .h_awsize(h_awsize), .h_awburst(h_awburst), .h_awvalid(h_awvalid), .h_awready(h_awready),
     .h_wdata(h_wdata), .h_wstrb(h_wstrb), .h_wlast(h_wlast), .h_wvalid(h_wvalid), .h_wready(h_wready),
     .h_bresp(h_bresp), .h_bvalid(h_bvalid), .h_bready(h_bready),

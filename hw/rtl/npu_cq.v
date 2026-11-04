@@ -56,6 +56,7 @@ module npu_cq (
   input  wire        msi_enable,
   output reg         msi_request,     // one-cycle pulse
   input  wire        msi_grant,       // one-cycle pulse
+  input  wire        irq_test,        // one-cycle pulse: raise one MSI (npu_regs IRQ register)
 
   // Host port: AXI4 master into the bridge's slave window
   output wire [31:0] h_awaddr,  output wire [7:0] h_awlen,  output wire [2:0] h_awsize,
@@ -135,10 +136,20 @@ module npu_cq (
   wire [31:0] g_m = cmd0[63:32];
   wire [15:0] g_k = cmd3[15:0], g_n = cmd3[31:16];
   wire        g_out32 = cmd3[41];
-  wire [63:0] g_a_end = {32'd0, cmd1[31:0]}  + {32'd0, g_m} * {48'd0, g_k};
-  wire [63:0] g_b_end = {32'd0, cmd1[63:32]} + {48'd0, g_n} * {48'd0, g_k};
-  wire [63:0] g_c_end = {32'd0, cmd2[31:0]}  + {32'd0, g_m} * {48'd0, g_n} * (g_out32 ? 64'd4 : 64'd1);
-  wire [63:0] g_bias_end = {32'd0, cmd2[63:32]} + {48'd0, g_n} * 64'd4;
+  // The bounds take two registered stages (products, then ends) to meet the
+  // 125 MHz clock. The command words are complete at least four beats before
+  // S_EXEC (beats 4 to 7 still arrive), so the result is settled by then.
+  reg  [47:0] g_mk, g_nk, g_mn;
+  reg  [63:0] g_a_end, g_b_end, g_c_end, g_bias_end;
+  always @(posedge clk) begin
+    g_mk <= g_m * g_k;
+    g_nk <= g_n * g_k;
+    g_mn <= g_m * g_n;
+    g_a_end    <= {32'd0, cmd1[31:0]}  + {16'd0, g_mk};
+    g_b_end    <= {32'd0, cmd1[63:32]} + {16'd0, g_nk};
+    g_c_end    <= {32'd0, cmd2[31:0]}  + (g_out32 ? {14'd0, g_mn, 2'd0} : {16'd0, g_mn});
+    g_bias_end <= {32'd0, cmd2[63:32]} + {30'd0, g_n, 2'd0};
+  end
   wire gemm_ok = (g_m != 0) && (g_k != 0) && (g_k[5:0] == 0) && (g_k <= 16'd2048) &&
                  (g_n != 0) && (g_n[5:0] == 0) && (g_n <= 16'd1024) &&
                  (cmd1[5:0] == 0) && (cmd1[37:32] == 0) && (cmd2[5:0] == 0) && (cmd2[37:32] == 0) &&
@@ -188,6 +199,7 @@ module npu_cq (
         msi_pending <= 1'b0;
       end
       if (msi_grant || !msi_enable) msi_wait <= 1'b0;   // no grant comes once MSI is off
+      if (irq_test) msi_pending <= 1'b1;
 
       case (state)
         S_IDLE:

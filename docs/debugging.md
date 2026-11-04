@@ -14,13 +14,13 @@ The card carries its own instruments, so a problem in the memory system can be s
 
 | Core | Where | Clock | What it gives |
 | --- | --- | --- | --- |
-| `axi_dma_mon` | `hw/rtl/axi_dma_mon.v`, on XDMA's AXI4 master | PCIe user clock, 125 MHz | `DMA_WRITES`, `DMA_READS`, `DMA_ERRORS` in BAR0 |
+| `axi_dma_mon` | `hw/rtl/axi_dma_mon.v`, on `npu_cq`'s card port (XDMA's AXI master before phase 3) | PCIe clock, 125 MHz | `DMA_WRITES`, `DMA_READS`, `DMA_ERRORS` in BAR0 |
 | `npu_regs` STATUS | `hw/rtl/npu_regs.v` | PCIe user clock | `[1]` DDR3 calibrated, `[2]` DDR3 clock locked |
-| System ILA on the PCIe side (`system_ila_0`) | `card_mem` block design, on `S_AXI_PCIE` | PCIe user clock | 2048 samples of XDMA's AXI4 traffic, with an AXI protocol checker |
-| System ILA on the MIG side (`system_ila_1`) | `card_mem`, on the MIG's AXI port | MIG `ui_clk`, 100 MHz | 1024 samples of the 512-bit AXI traffic into the MIG, with a protocol checker |
-| VIO | `card_mem` | Debug clock, 78.125 MHz | Inputs: calibration done, MMCM locked. Output: MIG reset request |
-| JTAG-to-AXI master | `card_mem`, second master on the SmartConnect | MIG `ui_clk` | Reads and writes DDR3 from Vivado Tcl |
-| `mem_bw` | `hw/rtl/mem_bw.v`, third master on the SmartConnect | MIG `ui_clk` | 512-bit burst traffic with data check; bandwidth from the card's cycle counter (`BW_*` registers) |
+| System ILA on the PCIe side (`system_ila_0`) | `card_sys` block design, on `S_AXI_HOST` | PCIe clock, 125 MHz | 2048 samples of `npu_cq`'s AXI4 traffic into host memory (command fetches, completions, copies), with an AXI protocol checker. Before phase 3 it watched XDMA's AXI master into card memory. |
+| System ILA on the MIG side (`system_ila_1`) | `card_sys`, on the MIG's AXI port | MIG `ui_clk`, 100 MHz | 1024 samples of the 512-bit AXI traffic into the MIG, with a protocol checker |
+| VIO | `card_sys` | Debug clock, 78.125 MHz | Inputs: calibration done, MMCM locked. Output: MIG reset request |
+| JTAG-to-AXI master | `card_sys`, second master on the DDR3 SmartConnect | MIG `ui_clk` | Reads and writes DDR3 from Vivado Tcl |
+| `mem_bw` | `hw/rtl/mem_bw.v`, third master on the DDR3 SmartConnect | MIG `ui_clk` | 512-bit burst traffic with data check; bandwidth from the card's cycle counter (`BW_*` registers) |
 
 The debug hub, the VIO and the ILAs' JTAG side run from the AC701's Si570 user clock (156.25 MHz at power-up, divided to 78.125 MHz in `npu_top`). That clock does not depend on the PCIe host or on the MIG, so Vivado can still reach the debug cores when the link is down or the memory controller is held in reset. The ILA on the PCIe side samples only while the host supplies the PCIe reference clock; the Hardware Manager reports its clock as not running otherwise.
 

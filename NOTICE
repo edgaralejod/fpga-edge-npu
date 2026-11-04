@@ -9,3 +9,8 @@ Subsystem for PCI Express (XDMA) and the AXI BRAM Controller, from settings in
 hw/scripts/ip.tcl. Those cores are not part of this repository and are subject
 to AMD's own license terms. The host DMA driver is AMD's dma_ip_drivers,
 obtained separately under its own license.
+
+Exception: sw/driver/fpga_npu.c, the Linux kernel driver, is licensed under
+GPL-2.0 (SPDX-License-Identifier: GPL-2.0), as Linux kernel modules must be.
+sw/driver/fpga_npu.h, shared by the driver and the user-space runtime, is
+GPL-2.0 OR Apache-2.0. Everything else is Apache-2.0.

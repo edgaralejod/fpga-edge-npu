@@ -30,7 +30,10 @@ Run one Vivado at a time per directory: Vivado's `.Xil/Vivado-<pid>-<host>` temp
 | Registers | `hw/rtl/npu_regs.v` | `docs/register-map.md`, `hw/sim/tb_npu_regs.v`, `sw/tools/npu-ctl.c` |
 | Top level, clocks, LEDs | `hw/rtl/npu_top.v` | `docs/register-map.md` (LEDs), `ARCHITECTURE.md` |
 | PCIe or IP settings | `hw/scripts/ip.tcl` | `docs/register-map.md` (PCIe identity), `ARCHITECTURE.md` |
-| Memory system, debug cores | `hw/bd/card_mem.tcl` | `docs/debugging.md`, `ARCHITECTURE.md`, `npu_top` port list |
+| PCIe bridge, memory system, debug cores | `hw/bd/card_sys.tcl` | `docs/debugging.md`, `docs/command-queue.md`, `ARCHITECTURE.md`, `npu_top` port list |
+| Command queue, GEMM engine | `hw/rtl/npu_cq.v`, `hw/rtl/npu_mm.v` | `docs/command-queue.md`, `hw/sim/tb_npu_cq.v`, `sw/npu/npu.c`, `sw/npu/npu_ref.py` (bit-exact model) |
+| Driver, runtime, tools | `sw/driver/`, `sw/npu/` | `docs/bringup.md`, `docs/command-queue.md` |
+| MNIST model | `sw/mnist/train.py` | `sw/mnist/README.md`, `docs/bringup.md` |
 | JTAG debug scripts | `hw/scripts/debug.tcl` | `docs/debugging.md`, `Makefile` |
 | Pins, configuration | `hw/constr/ac701.xdc`, `hw/constr/debug.xdc` | `docs/hardware-setup.md` |
 | Build flow | `hw/scripts/*.tcl`, `Makefile` | `README.md`, this file |
@@ -40,6 +43,8 @@ Run one Vivado at a time per directory: Vivado's `.Xil/Vivado-<pid>-<host>` temp
 ## Rules
 
 - Never commit generated output: `build/`, AMD IP products, bitstreams, logs. The repository holds sources and the Tcl that recreates the IP.
+- AXI masters and slaves follow AMD's templates (`hw/scripts/axil_template.tcl`) and are simulated against `hw/sim/axi_mem_model.v`, which checks the handshake rules; a slave that waits for WVALID must not deadlock a master.
+- The GEMM engine and `sw/npu/npu_ref.py` must agree bit for bit; change both together.
 - RTL is Verilog-2001 with `default_nettype none`, one module per file, synchronous active-low resets on the AXI clock, and comments that say why rather than what.
 - A register change updates the RTL, the register map, the testbench and `npu-ctl` in the same commit.
 - Label numbers as measured (with date and setup), estimated, or from a vendor document.

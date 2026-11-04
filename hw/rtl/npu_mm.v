@@ -17,8 +17,9 @@
 //
 // For each output row the engine loads A's row into block RAM, then streams
 // all of Bt past it at one 64-bit beat (8 MACs) per cycle, finishing one
-// output every K/8 beats through a five-stage pipeline, and writes the row
-// out. Reads are 64-byte bursts (never crossing 4 KiB), up to 16 in flight;
+// output every K/8 beats through a nine-stage pipeline (operands, products,
+// two adder levels, accumulate, bias, scale, round, shift, clamp), and writes
+// the row out. Every stage fits the 125 MHz clock. Reads are 64-byte bursts (never crossing 4 KiB), up to 16 in flight;
 // writes present address and data together, as the AXI rules require.
 
 `timescale 1ns / 1ps
@@ -59,6 +60,8 @@ module npu_mm (
   wire [8:0]  kw      = rk[11:3];                    // A row in 64-bit words (K/8, up to 256)
   wire [31:0] c_row_b = rout32 ? {14'd0, rn, 2'd0} : {16'd0, rn};   // bytes per C row
   reg  [31:0] m_idx;
+  reg  [31:0] a_row, c_row;                        // card addresses of the current rows
+  reg  [31:0] b_beats;                             // N x K/8
 
   // ---------------------------------------------------------------------------
   // Read side: one region per phase (bias, an A row, all of Bt), 8-beat bursts.
@@ -73,46 +76,38 @@ module npu_mm (
   // ---------------------------------------------------------------------------
   // Buffers
   reg  [63:0] abuf [0:255];                // A row
-  reg  [31:0] biasm [0:1023];              // bias vector
+  reg  [63:0] biasw [0:511];               // bias vector, two INT32 per word
   reg  [7:0]  ob0 [0:511], ob1 [0:511], ob2 [0:511], ob3 [0:511],   // C row, one array per
               ob4 [0:511], ob5 [0:511], ob6 [0:511], ob7 [0:511];   // byte lane of a 64-bit word
 
   // ---------------------------------------------------------------------------
-  // Dot-product pipeline (ST_B)
+  // Dot-product pipeline (ST_B). Valid, first/last-beat and output-index
+  // flags travel with the data through every stage.
   reg  [8:0]  j;           // beat within the current Bt row
   reg  [9:0]  n;           // current Bt row
-  reg  [63:0] a_q, b_q;
-  reg         v1, first1, last1;  reg [9:0] n1;
-  reg  signed [19:0] p2;   reg v2, first2, last2;  reg [9:0] n2;
+  reg  [63:0] a_q, b_q;                         reg v1, f1, l1; reg [9:0] n1;
+  (* use_dsp = "yes" *) reg signed [15:0] pr [0:7];  reg v2, f2, l2; reg [9:0] n2;
+  reg  signed [17:0] sa, sb;                    reg v3, f3, l3; reg [9:0] n3;
+  reg  signed [18:0] dsum;                      reg v4, f4, l4; reg [9:0] n4;
   reg  signed [31:0] acc;
-  reg         v3; reg [9:0] n3; reg signed [31:0] acc3;
-  reg  signed [31:0] bias_q;
-  reg         v4; reg [9:0] n4; reg signed [31:0] sum4;
-  reg  signed [48:0] prod5; reg v5; reg [9:0] n5; reg signed [31:0] sum5;
-  wire        pipe_busy = v1 | v2 | v3 | v4 | v5;
+  reg  signed [31:0] acc5;                      reg v5; reg [9:0] n5;
+  reg  [63:0] bias_w;                           // read in stage 5, used in 6
+  reg  signed [31:0] sum6;                      reg v6; reg [9:0] n6;
+  reg  signed [48:0] prod7;                     reg v7; reg [9:0] n7; reg signed [31:0] sum7;
+  reg  signed [48:0] rnd8;                      reg v8; reg [9:0] n8; reg signed [31:0] sum8;
+  reg  signed [48:0] shf9;                      reg v9; reg [9:0] n9; reg signed [31:0] sum9;
+  wire        pipe_busy = v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9;
 
-  function signed [19:0] dot8(input [63:0] a, input [63:0] b);
-    integer i;
-    reg signed [19:0] s;
+  function [7:0] clamp8(input signed [48:0] r, input rl);
+    reg signed [48:0] t;
     begin
-      s = 0;
-      for (i = 0; i < 8; i = i + 1)
-        s = s + $signed(a[i*8 +: 8]) * $signed(b[i*8 +: 8]);
-      dot8 = s;
+      t = (rl && r < 0) ? 49'sd0 : r;
+      if (t > 127) t = 127;
+      if (t < -128) t = -128;
+      clamp8 = t[7:0];
     end
   endfunction
-
-  // Requantize a scaled product to INT8.
-  function [7:0] requant(input signed [48:0] p, input [4:0] sh, input rl);
-    reg signed [48:0] r;
-    begin
-      r = (sh == 0) ? p : ((p + (49'sd1 <<< (sh - 1))) >>> sh);
-      if (rl && r < 0) r = 0;
-      if (r > 127) r = 127;
-      if (r < -128) r = -128;
-      requant = r[7:0];
-    end
-  endfunction
+  wire [7:0] q9 = clamp8(shf9, rrelu);
 
   // ---------------------------------------------------------------------------
   // Write side (ST_C): 8-beat bursts of the C row, address and data together.
@@ -129,7 +124,7 @@ module npu_mm (
   wire [5:0]  w_b      = w_idx[8:3];
   wire [8:0]  ob_addr  = (wvalid && wready) ? w_idx + 9'd1 : w_idx;
   assign awvalid = (st == ST_C) && (aw_b < n_bursts);
-  assign awaddr  = rc + m_idx * c_row_b + {20'd0, aw_b, 6'd0};
+  assign awaddr  = c_row + {20'd0, aw_b, 6'd0};
   assign awlen   = 8'd7;
   assign wvalid  = (st == ST_C) && w_primed && (w_idx < w_total) && (w_b <= aw_b);
   assign wdata   = ob_q;
@@ -143,59 +138,70 @@ module npu_mm (
 
   // Buffer writes
   always @(posedge clk) begin
-    if (r_fire && st == ST_BIAS) begin
-      biasm[{r_cnt[8:0], 1'b0}] <= rdata[31:0];
-      biasm[{r_cnt[8:0], 1'b1}] <= rdata[63:32];
-    end
+    if (r_fire && st == ST_BIAS) biasw[r_cnt[8:0]] <= rdata;
     if (r_fire && st == ST_A) abuf[r_cnt[7:0]] <= rdata;
-    if (v5) begin
+    if (v9) begin
       if (rout32) begin
-        if (n5[0]) begin ob4[n5[9:1]] <= sum5[7:0]; ob5[n5[9:1]] <= sum5[15:8]; ob6[n5[9:1]] <= sum5[23:16]; ob7[n5[9:1]] <= sum5[31:24]; end
-        else       begin ob0[n5[9:1]] <= sum5[7:0]; ob1[n5[9:1]] <= sum5[15:8]; ob2[n5[9:1]] <= sum5[23:16]; ob3[n5[9:1]] <= sum5[31:24]; end
+        if (n9[0]) begin ob4[n9[9:1]] <= sum9[7:0]; ob5[n9[9:1]] <= sum9[15:8]; ob6[n9[9:1]] <= sum9[23:16]; ob7[n9[9:1]] <= sum9[31:24]; end
+        else       begin ob0[n9[9:1]] <= sum9[7:0]; ob1[n9[9:1]] <= sum9[15:8]; ob2[n9[9:1]] <= sum9[23:16]; ob3[n9[9:1]] <= sum9[31:24]; end
       end else begin
-        case (n5[2:0])
-          3'd0: ob0[{2'd0, n5[9:3]}] <= requant(prod5, rshift, rrelu);
-          3'd1: ob1[{2'd0, n5[9:3]}] <= requant(prod5, rshift, rrelu);
-          3'd2: ob2[{2'd0, n5[9:3]}] <= requant(prod5, rshift, rrelu);
-          3'd3: ob3[{2'd0, n5[9:3]}] <= requant(prod5, rshift, rrelu);
-          3'd4: ob4[{2'd0, n5[9:3]}] <= requant(prod5, rshift, rrelu);
-          3'd5: ob5[{2'd0, n5[9:3]}] <= requant(prod5, rshift, rrelu);
-          3'd6: ob6[{2'd0, n5[9:3]}] <= requant(prod5, rshift, rrelu);
-          default: ob7[{2'd0, n5[9:3]}] <= requant(prod5, rshift, rrelu);
+        case (n9[2:0])
+          3'd0: ob0[{2'd0, n9[9:3]}] <= q9;
+          3'd1: ob1[{2'd0, n9[9:3]}] <= q9;
+          3'd2: ob2[{2'd0, n9[9:3]}] <= q9;
+          3'd3: ob3[{2'd0, n9[9:3]}] <= q9;
+          3'd4: ob4[{2'd0, n9[9:3]}] <= q9;
+          3'd5: ob5[{2'd0, n9[9:3]}] <= q9;
+          3'd6: ob6[{2'd0, n9[9:3]}] <= q9;
+          default: ob7[{2'd0, n9[9:3]}] <= q9;
         endcase
       end
     end
   end
 
   // Pipeline
+  integer pi;
   always @(posedge clk) begin
-    // Stage 1: an A word and a Bt beat
+    // 1: an A word and a Bt beat
     v1 <= 1'b0;
     if (r_fire && st == ST_B) begin
       a_q <= abuf[j[7:0]];
       b_q <= rdata;
-      v1 <= 1'b1; first1 <= (j == 0); last1 <= (j == kw - 9'd1); n1 <= n;
+      v1 <= 1'b1; f1 <= (j == 0); l1 <= (j == kw - 9'd1); n1 <= n;
     end
-    // Stage 2: eight products, summed
-    v2 <= v1; first2 <= first1; last2 <= last1; n2 <= n1;
-    p2 <= dot8(a_q, b_q);
-    // Stage 3: accumulate; finish an output at the row's last beat
-    v3 <= 1'b0;
-    if (v2) begin
-      acc <= first2 ? {{12{p2[19]}}, p2} : acc + {{12{p2[19]}}, p2};
-      if (last2) begin
-        v3 <= 1'b1; n3 <= n2;
-        acc3 <= first2 ? {{12{p2[19]}}, p2} : acc + {{12{p2[19]}}, p2};
+    // 2: eight products
+    for (pi = 0; pi < 8; pi = pi + 1)
+      pr[pi] <= $signed(a_q[pi*8 +: 8]) * $signed(b_q[pi*8 +: 8]);
+    v2 <= v1; f2 <= f1; l2 <= l1; n2 <= n1;
+    // 3, 4: adder tree
+    sa <= pr[0] + pr[1] + pr[2] + pr[3];
+    sb <= pr[4] + pr[5] + pr[6] + pr[7];
+    v3 <= v2; f3 <= f2; l3 <= l2; n3 <= n2;
+    dsum <= sa + sb;
+    v4 <= v3; f4 <= f3; l4 <= l3; n4 <= n3;
+    // 5: accumulate; an output is finished at its row's last beat
+    v5 <= 1'b0;
+    if (v4) begin
+      acc <= f4 ? {{13{dsum[18]}}, dsum} : acc + {{13{dsum[18]}}, dsum};
+      if (l4) begin
+        v5 <= 1'b1; n5 <= n4;
+        acc5 <= f4 ? {{13{dsum[18]}}, dsum} : acc + {{13{dsum[18]}}, dsum};
       end
     end
-    bias_q <= biasm[n2];
-    // Stage 4: bias
-    v4 <= v3; n4 <= n3;
-    sum4 <= acc3 + bias_q;
-    // Stage 5: scale
-    v5 <= v4; n5 <= n4; sum5 <= sum4;
-    prod5 <= sum4 * $signed({1'b0, rmult});
-    if (!rst_n) begin v1 <= 0; v2 <= 0; v3 <= 0; v4 <= 0; v5 <= 0; end
+    bias_w <= biasw[n4[9:1]];
+    // 6: bias
+    v6 <= v5; n6 <= n5;
+    sum6 <= acc5 + $signed(n5[0] ? bias_w[63:32] : bias_w[31:0]);
+    // 7: scale
+    v7 <= v6; n7 <= n6; sum7 <= sum6;
+    prod7 <= sum6 * $signed({1'b0, rmult});
+    // 8: add the rounding term
+    v8 <= v7; n8 <= n7; sum8 <= sum7;
+    rnd8 <= (rshift == 0) ? prod7 : prod7 + (49'sd1 <<< (rshift - 5'd1));
+    // 9: arithmetic shift; clamp and buffer write follow (q9)
+    v9 <= v8; n9 <= n8; sum9 <= sum8;
+    shf9 <= rnd8 >>> rshift;
+    if (!rst_n) begin v1 <= 0; v2 <= 0; v3 <= 0; v4 <= 0; v5 <= 0; v6 <= 0; v7 <= 0; v8 <= 0; v9 <= 0; end
   end
 
   // ---------------------------------------------------------------------------
@@ -226,6 +232,8 @@ module npu_mm (
             ra <= a_addr; rb <= b_addr; rc <= c_addr; rbias <= bias_addr; rm <= m_rows;
             rk <= k_len; rn <= n_len; rshift <= shift; rrelu <= relu; rout32 <= out32; rmult <= mult;
             err <= 1'b0; m_idx <= 0; b_got <= 0; b_need <= 0;
+            a_row <= a_addr; c_row <= c_addr;
+            b_beats <= {16'd0, n_len} * {23'd0, k_len[11:3]};
             start_read(bias_addr, {17'd0, n_len[15:1]});        // N int32 = N/2 beats
             st <= ST_BIAS;
           end
@@ -238,7 +246,7 @@ module npu_mm (
 
         ST_A:
           if (r_cnt == rd_total) begin
-            start_read(rb, {16'd0, rn} * {23'd0, kw});            // all of Bt
+            start_read(rb, b_beats);                               // all of Bt
             j <= 0; n <= 0;
             st <= ST_B;
           end
@@ -271,7 +279,9 @@ module npu_mm (
             if (m_idx + 32'd1 == rm) st <= ST_IDLE;
             else begin
               m_idx <= m_idx + 32'd1;
-              start_read(ra + (m_idx + 32'd1) * {16'd0, rk}, {23'd0, kw});
+              a_row <= a_row + {16'd0, rk};
+              c_row <= c_row + c_row_b;
+              start_read(a_row + {16'd0, rk}, {23'd0, kw});
               st <= ST_A;
             end
           end

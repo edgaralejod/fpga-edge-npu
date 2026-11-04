@@ -4,52 +4,65 @@ This document describes the boundaries that exist today and the decisions behind
 
 ## Product decision
 
-Build a PCIe accelerator card the way commercial edge-AI modules are built, with an FPGA standing in for the ASIC, and keep every layer open. Reuse AMD's PCIe DMA core (XDMA) and AMD's reference Linux driver for the transport, so effort goes into the parts that make an accelerator: the control interface, the on-card memory system, the compute engine, the compiler and the runtime. Replace a reused part only when it blocks something the project needs to show, and say why.
+Build a PCIe accelerator card the way commercial edge-AI modules are built, with an FPGA standing in for the ASIC, and keep every layer open. Reuse AMD's PCIe bridge and memory controller cores for the physical layers, so effort goes into the parts that make an accelerator: the control interface, the command queue and DMA, the compute engine, the driver and runtime, the compiler. Replace a reused part only when it blocks something the project needs to show, and say why (phase 3 replaced AMD's XDMA DMA core and driver; see below).
 
-The host side targets embedded Linux on an NXP i.MX95, the class of host that discrete NPUs are sold for. Nothing in the card is specific to that host; any PCIe Linux machine with the XDMA driver can drive it.
+The host side targets embedded Linux on an NXP i.MX95, the class of host that discrete NPUs are sold for. Nothing in the card is specific to that host; any PCIe Linux machine that can build the `fpga-npu` driver can drive it.
 
 ## Implemented layers
 
 | Layer | Implementation | Boundary |
 | --- | --- | --- |
 | Physical link | AC701 x4 edge connector, M.2 Key-M adapter, FRDM-i.MX95 PCIe 3.0 x1 | Trains at Gen2 x1; the slower end sets the speed. |
-| PCIe endpoint | XDMA (AMD PG195), `hw/scripts/ip.tcl` | Configuration space, BARs, MSI, the DMA engine. Generated at build time, never edited. |
-| Control plane | `hw/rtl/npu_regs.v` on BAR0 | Every host-visible control and status bit of the card. Single-beat AXI-Lite, 125 MHz, on AMD's AXI4-Lite slave template (`hw/scripts/axil_template.tcl` regenerates it). [Register map](docs/register-map.md). |
-| Data plane | XDMA H2C/C2H channels into the `card_mem` block design (`hw/bd/card_mem.tcl`): SmartConnect, MIG, DDR3 SODIMM | Bulk data between host memory and card memory: 1 GiB of DDR3 at AXI address 0 (800 MT/s, 64 bits). SmartConnect converts XDMA's 64-bit, 125 MHz AXI to the MIG's 512-bit, 100 MHz port. Phase 1 used 64 KiB of BRAM. |
-| Top level | `hw/rtl/npu_top.v` | Wires the parts; owns clocks, resets and LEDs, including the debug clock. No logic of its own beyond the heartbeat and the DMA counters (`axi_dma_mon`). |
-| Card-side memory engine | `hw/rtl/mem_bw.v`, a third master on the SmartConnect, in the MIG clock domain | 512-bit AXI4 bursts (4 KiB, up to 16 in flight) that measure DDR3 bandwidth without the PCIe link and check the data they read back. Controlled from BAR0 (`BW_*`); the start of the compute engine's data movement. |
-| Debug | System ILAs, VIO and JTAG-to-AXI in `card_mem`; DMA counters and DDR status in BAR0 | Every memory-system problem can be seen from the host's registers, from Vivado over JTAG, or as AXI waveforms. [Debugging](docs/debugging.md). |
-| Host driver | Xilinx `dma_ip_drivers` XDMA, unmodified | Owns BAR1 and the descriptor rings; exposes `/dev/xdma0_*`. |
-| Host tool | `sw/tools/npu-ctl.c` | Bring-up and measurement: registers, latency, DMA loopback. Not the runtime. |
+| PCIe endpoint | AMD's AXI Memory Mapped to PCI Express bridge (`axi_pcie`, PG055) in the `card_sys` block design (`hw/bd/card_sys.tcl`) | Configuration space (device `10ee:ed10`, class `12 00 00`), BAR0 as an AXI master, a slave window through which the card reads and writes host memory (AXI `0x8000_0000` reaches bus address 0, 2 GiB), MSI. 64-bit AXI at 125 MHz. |
+| Control plane | `hw/rtl/npu_regs.v` on BAR0 | Every host-visible control and status bit of the card, the command queue's doorbells included. AXI4-Lite through a SmartConnect converter, on AMD's AXI4-Lite slave template. [Register map](docs/register-map.md). |
+| Command queue | `hw/rtl/npu_cq.v` | Fetches 64-byte commands from a ring in host memory, runs them, writes 16-byte completions with a phase bit and card timestamps, requests MSIs. Copies between host and card memory stream through a FIFO. [Command queue](docs/command-queue.md). |
+| Compute | `hw/rtl/npu_mm.v`, behind `npu_cq`'s `GEMM` command | INT8 matrix multiply with INT32 accumulation, bias, requantization and ReLU, eight MACs per cycle, reading and writing card memory. `sw/npu/npu_ref.py` is its bit-exact model. |
+| Card memory | MIG, SmartConnect and DDR3 SODIMM in `card_sys` | 1 GiB of DDR3 at AXI address 0 (800 MT/s, 64 bits), shared by `npu_cq` (64-bit, 125 MHz), `mem_bw` (512-bit, 100 MHz) and a JTAG-to-AXI master. |
+| Card-side memory engine | `hw/rtl/mem_bw.v` | 512-bit AXI4 bursts (4 KiB, up to 16 in flight) that measure DDR3 bandwidth without the PCIe link and check the data they read back. Controlled from BAR0 (`BW_*`). |
+| Top level | `hw/rtl/npu_top.v` | Wires the parts; owns the reference and debug clocks, the LEDs and the DMA counters (`axi_dma_mon`). |
+| Debug | System ILAs, VIO and JTAG-to-AXI in `card_sys`; DMA counters, DDR and queue status in BAR0 | Every problem can be seen from the host's registers, from Vivado over JTAG, or as AXI waveforms. [Debugging](docs/debugging.md). |
+| Host driver | `sw/driver/fpga_npu.c` (GPL-2.0) | Owns the PCI device, one 32 MiB DMA arena (31-bit DMA mask, IOMMU on) and the MSI; exposes `/dev/fpga-npu` for `mmap` of the arena and BAR0, an info `ioctl`, and a blocking interrupt `read`. |
+| Runtime | `sw/npu/npu.c`, `npu.h` | Rings, commands, doorbells, completions, memory carving, in user space, as accelerator stacks do. Tools on top: `npu-test` (acceptance tests), `npu-mnist`. |
+| Bring-up tool | `sw/tools/npu-ctl.c` | Register access, latency, and (for phases 1 and 2 cards) XDMA DMA tests. |
 
 ```mermaid
 flowchart LR
-    APP[npu-ctl / later: runtime] --> DRV[XDMA driver]
-    APP -->|mmap BAR0| REGS
-    DRV -->|PCIe Gen2 x1| XDMA[XDMA endpoint]
-    XDMA -->|BAR0 AXI-Lite| REGS[npu_regs]
-    XDMA -->|DMA AXI4| MEM[Card memory]
-    REGS -.->|later: doorbell, status| ENG[NPU engine]
-    MEM -.->|later: weights, tensors| ENG
+    APP[npu-mnist, npu-test] --> RT[runtime: npu.c]
+    RT -->|mmap arena: rings, buffers| ARENA[(host DMA arena)]
+    RT -->|mmap BAR0: doorbells| REGS
+    DRV[fpga-npu driver] -.->|owns| ARENA
+    RT -->|read: MSI count| DRV
+    BR[axi_pcie bridge] -->|BAR0| REGS[npu_regs]
+    REGS -->|doorbells| CQ[npu_cq]
+    CQ -->|fetch commands, write completions, copy| BR
+    BR <-->|PCIe Gen2 x1| ARENA
+    CQ -->|GEMM| MM[npu_mm]
+    CQ --> DDR[(DDR3 1 GiB)]
+    MM --> DDR
+    CQ -->|MSI| BR
 ```
 
 ## Decisions
 
-**XDMA instead of a hand-written PCIe transaction layer.** The previous experiment in this workspace drove the 7-series PCIe block directly with the PIO example. That shows TLPs but leaves DMA, descriptor handling and interrupts to write from scratch, and those are not the subject of this project. XDMA provides a scatter-gather engine of the kind real accelerators use, plus a maintained Linux driver.
+**A bridge and an engine of our own instead of XDMA (phase 3).** Phases 1 and 2 used AMD's XDMA core and driver: a scatter-gather DMA engine with a maintained Linux driver, chosen over the bare PCIe block's TLP interface so the link worked early. But XDMA only moves data when the host's driver programs it, and on the Artix-7 it has no bridge mode, so the card could not fetch commands itself, which is how NVMe drives and AI accelerators work. Phase 3 switched to AMD's `axi_pcie` bridge, whose slave window lets card logic read and write host memory, and wrote the queue and DMA engine (`npu_cq`) and the driver for the project. AMD's XDMA driver also had a bug the IOMMU exposed (bring-up, "Problems found"); that path is history now.
 
-**Gen2 x1, 64-bit AXI at 125 MHz.** The i.MX95 slot has one lane, so wider configurations would not train wider. At Gen2 x1, a 64-bit datapath at 125 MHz (1 GB/s) is more than the link's 500 MB/s, so the AXI side is never the bottleneck.
+**Gen2 x1, 64-bit AXI at 125 MHz.** The i.MX95 slot has one lane, so wider configurations would not train wider. At Gen2 x1, a 64-bit datapath at 125 MHz (1 GB/s) is more than the link's 500 MB/s, so the AXI side is never the bottleneck. PG055 gives 125 MHz for every configuration except Gen1 x1.
 
-**Control and data on separate BARs.** BAR0 is the card's own register map; BAR1 belongs to the DMA engine and its driver. A runtime can map BAR0 into user space without touching the driver's registers, which is how accelerator stacks keep doorbells cheap.
+**Rings in host memory, doorbells in BAR0.** The host writes commands into its own memory and rings one doorbell for a batch; the card fetches them, and writes completions back with a phase bit, so the host never reads a card register on the fast path (each register read costs about 1.2 µs). This is NVMe's queue model.
 
-**AMD's IDs and driver for now.** `10ee:7021` makes the stock XDMA driver bind without changes. A project ID comes with the project's own driver (roadmap phase 3).
+**A small kernel driver, the queue in user space.** The kernel module only owns what needs privilege: the PCI device, the DMA arena, the interrupt. Commands are built and completions consumed by a user-space runtime that maps the arena and BAR0, the split accelerator stacks use to keep submission cheap. One arena of coherent memory, mapped through the i.MX95's IOMMU with a 31-bit mask to match the bridge window.
+
+**`10ee:ed10` while this is a development board.** The bridge core defaults to AMD's vendor ID; `ed10` is not assigned to an AMD product, so no stock driver claims the card. A product would need its own vendor ID.
+
+**One GEMM engine before a network-specific pipeline.** The first compute block is a general INT8 matrix multiply with requantization: with a model compiler, it runs any network that fits in card memory (Ara's approach). A pipelined, weights-on-chip variant (Hailo's) is the comparison planned for later.
 
 **Bitstream in SPI flash.** The host enumerates PCIe once at boot, and expects the card ready within about 100 ms of releasing PERST#. The card configures itself from flash at power-on, compressed to shorten configuration time, and is powered before the host.
 
 **Non-project Tcl builds.** `hw/scripts/build.tcl` runs synthesis to bitstream from source and settings alone, so a clean clone builds with one command and the repository holds no generated files. Timing failure stops the build. `hw/scripts/create_project.tcl` makes a Vivado project from the same sources for exploring in the GUI; it is disposable.
 
-**A block design only for the memory system.** The MIG, SmartConnect, System ILA and their board-preset automation work best in IP Integrator, so `card_mem` is a block design, recreated by `hw/bd/card_mem.tcl` whenever that script changes. Everything written for this project stays in Verilog.
+**A block design only for AMD's cores.** The PCIe bridge, MIG, SmartConnects, resets and System ILAs, with their board-preset and debug automation, work best in IP Integrator, so they form one block design, `card_sys`, recreated by `hw/bd/card_sys.tcl` whenever that script changes (it was `card_mem` before phase 3). Everything written for this project stays in Verilog.
 
-**AXI against AMD's templates.** `npu_regs` is built on Vivado's AXI4-Lite slave template and `mem_bw`'s handshakes are checked against its AXI4 master template (`hw/scripts/axil_template.tcl` regenerates both). Each block's testbench drives it the way the real peer does and has a protocol monitor; the two AXI rules that were broken during development (a read response in its address cycle, write data waiting for the address handshake) each have a test that fails against the old code.
+**AXI against AMD's templates.** `npu_regs` is built on Vivado's AXI4-Lite slave template, and `mem_bw`, `npu_cq` and `npu_mm` follow its AXI4 master template's rules (`hw/scripts/axil_template.tcl` regenerates both). Each block's testbench drives it the way the real peer does and has a protocol monitor; the two AXI rules that were broken during development (a read response in its address cycle, write data waiting for the address handshake) each have a test that fails against the old code.
 
 **Debug cores on their own clock.** The debug hub and VIO run from the board's Si570 oscillator through an MMCM, not from the PCIe or MIG clocks, so the Hardware Manager can still reach them when there is no host or the memory controller is in reset.
 
