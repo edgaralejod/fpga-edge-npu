@@ -79,7 +79,7 @@ export function mountScene(host, def, D) {
   const el = document.createElement("section");
   el.className = "scene"; el.id = def.id;
   el.innerHTML = `
-    <div class="scene-head"><p class="kicker">${def.kicker || ""}</p><h2>${def.title}</h2></div>
+    <div class="scene-head"><p class="kicker">${def.kicker || ""}</p><h2>${def.title}</h2>${def.video ? `<a class="video" href="${def.video}">▶ Watch as a video (Manim)</a>` : ""}</div>
     <div class="scene-body">
       <div class="stage"><canvas width="${W}" height="${H}" aria-label="${def.title}"></canvas><div class="ctrls"></div></div>
       <aside class="narr">

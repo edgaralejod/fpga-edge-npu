@@ -68,6 +68,7 @@ The host side: `sw/driver/` builds `fpga_npu.ko` against the i.MX95's kernel tre
 | `sw/driver/` | `fpga-npu`, the Linux kernel driver (GPL-2.0): DMA arena, BAR0, MSI. |
 | `sw/npu/` | The user-space runtime (`npu.c`), `npu-test` (acceptance tests), `npu-mnist`, and `npu_ref.py`, the bit-exact model of the GEMM engine. |
 | `sw/mnist/` | `train.py`: trains and quantizes the MNIST network the card runs; `lessons.py` records that training run and the quantization data for the site's lessons. |
+| `sw/lessons/` | Manim scenes that render the lessons as video from the real data (a pilot: one neuron). |
 | `sw/tools/` | `npu-ctl`, the bring-up tool; `cacheprobe`, a check for stale CPU cache lines after card-to-host DMA. |
 | `sw/scripts/`, `sw/patches/` | Phases 1 and 2: loading AMD's XDMA driver at boot on the FRDM-i.MX95, and the fix for its IOMMU bug (see [bring-up](docs/bringup.md)). |
 | `docs/` | Background, hardware setup, bring-up, debugging, register map, command queue; `docs/results/` holds the raw logs of the hardware runs. |

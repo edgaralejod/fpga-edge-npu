@@ -94,3 +94,4 @@ h2 { font-size: 26px; line-height: 1.2; letter-spacing: -0.01em; margin: 0; }
 /* ?solo=<scene>: one scene alone */
 body.solo .intro, body.solo .part-head, body.solo .outro, body.solo .top, body.solo .foot { display: none; }
 body.solo .part { border: 0; padding: 16px 0; }
+.scene-head .video { display: inline-block; margin-top: 6px; font: 500 13px var(--mono); }
