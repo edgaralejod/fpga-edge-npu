@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>How the card recognizes a digit · fpga-edge-npu</title>
+  <meta name="description" content="Inference, training and INT8 quantization of the MNIST network the fpga-edge-npu card runs, animated step by step with the real weights and numbers, down to the DSP slices that do the multiplying.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="learn.css">
+</head>
+<body>
+  <header class="top">
+    <div class="wrap top-row">
+      <a class="brand" href="../"><span class="dot"></span>fpga-edge-npu</a>
+      <nav>
+        <a href="#part1">Inference</a>
+        <a href="#part2">Training</a>
+        <a href="#part3">Quantization</a>
+        <a href="#part4">On the FPGA</a>
+        <a href="../">The card</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="intro wrap">
+      <p class="eyebrow">Learn · for engineers who know the hardware</p>
+      <h1>How the card recognizes a digit</h1>
+      <p class="lede">If you can read a schematic, write a fixed-point filter and tune a controller, you already know almost all the math a neural network uses. What is missing is the story that ties it together: what the numbers mean, where they came from, and why eight bits are enough. These lessons tell it with the actual network the card runs, its actual 101 632 weights, the actual training run that produced them, and the card's actual arithmetic, down to the DSP slices.</p>
+      <p class="how">Each scene plays like a short video: press <b>Next</b> (or the → key) to advance, <b>◀</b> to go back, <b>Play all</b> to let it run. Most scenes also let you poke at them.</p>
+      <ol class="map">
+        <li><a href="#part1"><span>1</span><b>Inference</b>What the card computes: a picture becomes 784 numbers, 128 weighted sums, 10 scores.</a></li>
+        <li><a href="#part2"><span>2</span><b>Training</b>Where the weights came from: an error signal, a gradient, the chain rule, 4690 small corrections.</a></li>
+        <li><a href="#part3"><span>3</span><b>Quantization</b>From 32-bit floats to 8-bit integers: an ADC, a Q-format multiply, and what it costs.</a></li>
+        <li><a href="#part4"><span>4</span><b>On the FPGA</b>DSP slices, a nine-stage pipeline, and why reusing data made it 7.5 times faster.</a></li>
+      </ol>
+      <div class="glossary">
+        <p><b>Translation table.</b> Machine-learning words for things you already know:</p>
+        <dl>
+          <div><dt>neuron</dt><dd>a dot product plus an offset, then a clamp at zero</dd></div>
+          <div><dt>weights</dt><dd>the coefficients of that dot product: filter taps</dd></div>
+          <div><dt>bias</dt><dd>the offset</dd></div>
+          <div><dt>layer</dt><dd>a matrix multiply: many dot products sharing one input</dd></div>
+          <div><dt>activation</dt><dd>a neuron's output value</dd></div>
+          <div><dt>ReLU</dt><dd>max(0, x): a half-wave rectifier</dd></div>
+          <div><dt>inference</dt><dd>running the network forward to get an answer</dd></div>
+          <div><dt>training</dt><dd>adjusting the weights from labelled examples: system identification by gradient descent</dd></div>
+          <div><dt>loss</dt><dd>the error signal training minimizes</dd></div>
+          <div><dt>learning rate</dt><dd>the step size: a gain</dd></div>
+          <div><dt>quantization</dt><dd>representing the floats as scaled integers: Q-format</dd></div>
+          <div><dt>MAC</dt><dd>multiply-accumulate, the thing a DSP slice does</dd></div>
+        </dl>
+      </div>
+    </section>
+
+    <div class="part" id="part1">
+      <div class="wrap part-head"><p class="eyebrow">Part 1</p><h1>Inference: what the card computes</h1>
+        <p class="sub">No learning yet. Take the weights as given (part 2 explains where they came from) and follow one digit through the network, the way the card does for every image.</p></div>
+      <div class="wrap scenes" data-part="1"></div>
+    </div>
+    <div class="part" id="part2">
+      <div class="wrap part-head"><p class="eyebrow">Part 2</p><h1>Training: where the weights came from</h1>
+        <p class="sub">The network started as random numbers and scored 10 %, chance. <code>sw/mnist/train.py</code> turned them into the weights the card runs by showing it 60 000 labelled digits, ten times over, and nudging every weight downhill on an error signal after each batch of 128. This is that run, replayed.</p></div>
+      <div class="wrap scenes" data-part="2"></div>
+    </div>
+    <div class="part" id="part3">
+      <div class="wrap part-head"><p class="eyebrow">Part 3</p><h1>Quantization: fitting it into 8 bits</h1>
+        <p class="sub">Training produced 32-bit floats. The card multiplies 8-bit integers, because an 8 × 8 multiplier is tiny and 8-bit weights move four times faster than floats. Getting from one to the other is fixed-point arithmetic, exactly as you would scale a filter for a DSP.</p></div>
+      <div class="wrap scenes" data-part="3"></div>
+    </div>
+    <div class="part" id="part4">
+      <div class="wrap part-head"><p class="eyebrow">Part 4</p><h1>On the FPGA: multipliers, pipelines and reuse</h1>
+        <p class="sub">Everything above, in hardware: <code>hw/rtl/npu_mm.v</code> on the Artix-7's DSP48E1 slices, at 125 MHz.</p></div>
+      <div class="wrap scenes" data-part="4"></div>
+    </div>
+
+    <section class="wrap outro">
+      <h2>Where to go next</h2>
+      <p>The <a href="../#try">main page</a> lets you draw a digit and run this network in your browser, bit for bit as the card does, and shows the commands the host sends to run it on the FPGA. The code behind every scene is in the repository: <a href="https://github.com/edgaralejod/fpga-edge-npu/blob/main/sw/mnist/train.py"><code>train.py</code></a> (training and quantization), <a href="https://github.com/edgaralejod/fpga-edge-npu/blob/main/sw/npu/npu_ref.py"><code>npu_ref.py</code></a> (the card's arithmetic in Python), <a href="https://github.com/edgaralejod/fpga-edge-npu/blob/main/hw/rtl/npu_mm.v"><code>npu_mm.v</code></a> (the engine), and <a href="https://github.com/edgaralejod/fpga-edge-npu/blob/main/sw/mnist/lessons.py"><code>lessons.py</code></a>, which records the data these scenes play.</p>
+      <p>For more intuition, Grant Sanderson's <a href="https://www.3blue1brown.com/topics/neural-networks">3Blue1Brown series on neural networks</a> uses this same MNIST problem; these lessons follow its order and add the parts it leaves out: integers and hardware.</p>
+    </section>
+  </main>
+
+  <footer class="wrap foot">
+    <p>Created by Edgar Duarte. <a href="https://github.com/edgaralejod/fpga-edge-npu">github.com/edgaralejod/fpga-edge-npu</a>. Apache-2.0.</p>
+  </footer>
+  <script type="module" src="main.js"></script>
+</body>
+</html>
