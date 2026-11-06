@@ -18,6 +18,7 @@
     <div class="wrap top-row">
       <a class="brand" href="#top"><span class="dot"></span>fpga-edge-npu</a>
       <nav>
+        <a href="learn/">Learn</a>
         <a href="#try">Try it</a>
         <a href="#trace-sec">Timed</a>
         <a href="#system">System</a>
@@ -47,7 +48,7 @@
       <div class="wrap">
         <p class="eyebrow">00 · Try it</p>
         <h2>Draw a digit. Your browser runs the card's network, bit for bit.</h2>
-        <p class="sub">This is the network the card runs: the same INT8 weights file and the same integer arithmetic as the card's GEMM engine, right down to the rounding. On all 10 000 MNIST test images it makes exactly the same predictions as the card. Below the answer are the four commands the i.MX95 writes into the card's queue to get the same answer from the FPGA.</p>
+        <p class="sub">New to neural networks? <a href="learn/">The lessons</a> explain every step of this, from pixels to DSP slices, with this same network. This is the network the card runs: the same INT8 weights file and the same integer arithmetic as the card's GEMM engine, right down to the rounding. On all 10 000 MNIST test images it makes exactly the same predictions as the card. Below the answer are the four commands the i.MX95 writes into the card's queue to get the same answer from the FPGA.</p>
         <div class="demo loading" id="demo">
           <div class="pad-col">
             <canvas id="pad" width="280" height="280" aria-label="Drawing pad: draw a digit with the mouse, a finger or a pen"></canvas>

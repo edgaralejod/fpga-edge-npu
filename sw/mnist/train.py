@@ -59,7 +59,9 @@ def idx(path):
     return np.frombuffer(data, np.uint8, offset=8)
 
 
-def train(x, y, epochs=10, seed=1):
+def train(x, y, epochs=10, seed=1, hook=None):
+    """Adam on mini-batches of 128. hook(step, loss, params), if given, runs
+    after every step (sw/mnist/lessons.py records the run with it)."""
     rng = np.random.default_rng(seed)
     w1 = rng.normal(0, np.sqrt(2 / 784), (784, N1)).astype(np.float32)
     b1 = np.zeros(N1, np.float32)
@@ -78,6 +80,7 @@ def train(x, y, epochs=10, seed=1):
             z -= z.max(1, keepdims=True)
             p = np.exp(z)
             p /= p.sum(1, keepdims=True)
+            loss = -np.log(p[np.arange(len(yb)), yb] + 1e-12).mean() if hook else 0.0
             p[np.arange(len(yb)), yb] -= 1
             dz = p / len(yb)
             dh = (dz @ w2.T) * (h > 0)
@@ -87,6 +90,8 @@ def train(x, y, epochs=10, seed=1):
                 m[j] = beta1 * m[j] + (1 - beta1) * g
                 v[j] = beta2 * v[j] + (1 - beta2) * g * g
                 prm -= lr * (m[j] / (1 - beta1 ** step)) / (np.sqrt(v[j] / (1 - beta2 ** step)) + 1e-8)
+            if hook:
+                hook(step, loss, params)
         lr *= 0.7
     return w1, b1, w2, b2
 

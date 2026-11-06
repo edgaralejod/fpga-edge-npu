@@ -8,7 +8,7 @@ The reference pair is an AMD **AC701** (Artix-7 200T) as the card and an NXP **F
 
 Created by **Edgar Duarte**. Apache-2.0 licensed, except the Linux kernel driver in `sw/driver/`, which is GPL-2.0 as kernel modules must be.
 
-**[Interactive explainer](https://edgaralejod.github.io/fpga-edge-npu/)** · [Architecture](ARCHITECTURE.md) · [Roadmap](ROADMAP.md) · [How edge-AI cards work](docs/edge-ai-accelerators.md) · [Hardware setup](docs/hardware-setup.md) · [Bring-up](docs/bringup.md) · [Debugging](docs/debugging.md) · [Register map](docs/register-map.md) · [Command queue (design)](docs/command-queue.md) · [Contribute](CONTRIBUTING.md)
+**[Interactive explainer](https://edgaralejod.github.io/fpga-edge-npu/)** · **[Lessons: how the card recognizes a digit](https://edgaralejod.github.io/fpga-edge-npu/learn/)** · [Architecture](ARCHITECTURE.md) · [Roadmap](ROADMAP.md) · [How edge-AI cards work](docs/edge-ai-accelerators.md) · [Hardware setup](docs/hardware-setup.md) · [Bring-up](docs/bringup.md) · [Debugging](docs/debugging.md) · [Register map](docs/register-map.md) · [Command queue (design)](docs/command-queue.md) · [Contribute](CONTRIBUTING.md)
 
 ![The FRDM-i.MX95 on the left, joined by a flat riser cable to the PCIe edge connector of the AC701 on the right](docs/images/bench-setup.jpg)
 
@@ -67,11 +67,11 @@ The host side: `sw/driver/` builds `fpga_npu.ko` against the i.MX95's kernel tre
 | `hw/sim/` | Self-checking XSim testbenches and `axi_mem_model`, an AXI memory that checks the master's handshakes. |
 | `sw/driver/` | `fpga-npu`, the Linux kernel driver (GPL-2.0): DMA arena, BAR0, MSI. |
 | `sw/npu/` | The user-space runtime (`npu.c`), `npu-test` (acceptance tests), `npu-mnist`, and `npu_ref.py`, the bit-exact model of the GEMM engine. |
-| `sw/mnist/` | `train.py`: trains and quantizes the MNIST network the card runs. |
+| `sw/mnist/` | `train.py`: trains and quantizes the MNIST network the card runs; `lessons.py` records that training run and the quantization data for the site's lessons. |
 | `sw/tools/` | `npu-ctl`, the bring-up tool; `cacheprobe`, a check for stale CPU cache lines after card-to-host DMA. |
 | `sw/scripts/`, `sw/patches/` | Phases 1 and 2: loading AMD's XDMA driver at boot on the FRDM-i.MX95, and the fix for its IOMMU bug (see [bring-up](docs/bringup.md)). |
 | `docs/` | Background, hardware setup, bring-up, debugging, register map, command queue; `docs/results/` holds the raw logs of the hardware runs. |
-| `site/` | The [explainer website](https://edgaralejod.github.io/fpga-edge-npu/) (GitHub Pages, `make site-publish`): draw a digit and run the card's network in the browser, one inference timed by the card, interactive system map, animated data flows, measured numbers. |
+| `site/` | The [explainer website](https://edgaralejod.github.io/fpga-edge-npu/) (GitHub Pages, `make site-publish`): draw a digit and run the card's network in the browser, one inference timed by the card, interactive system map, animated data flows, measured numbers; and `learn/`, animated lessons on inference, training, quantization and the DSP pipeline, built from the real network. |
 
 The repository holds only source and settings. AMD IP (the PCIe bridge, MIG, SmartConnects and debug cores, all in the block design) is generated at build time from `hw/bd/card_sys.tcl`, never committed.
 

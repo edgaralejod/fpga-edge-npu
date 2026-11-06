@@ -19,6 +19,8 @@ Plain HTML, CSS and JavaScript in `public/`; no build step. Every number comes f
 | `public/model/mnist.bin` | A copy of `build/mnist/model.bin` from `sw/mnist/train.py` (format in `sw/mnist/README.md`). |
 | `public/model/samples.bin` | The first 40 MNIST test images: 40 label bytes, then 40 × 784 pixels. |
 | `check_mnist.mjs` | Checks `mnist.js` against the bit-exact model on all 10 000 test images. |
+| `public/learn/` | The lessons ("How the card recognizes a digit"): `index.html`, `learn.css`; `stage.js`, the step-by-step animation engine; `scenes-infer.js`, `scenes-train.js`, `scenes-quant.js`, `scenes-hw.js`, one file per part; `main.js` loads the data and mounts the scenes. |
+| `public/learn/data/` | From `sw/mnist/lessons.py`: the training run (`training.json`, `snapshots.bin`) and the float and INT8 networks side by side (`quant.json`). |
 
 After retraining, copy the model and check the browser network still matches:
 
@@ -27,7 +29,9 @@ cp build/mnist/model.bin site/public/model/mnist.bin
 node site/check_mnist.mjs build/mnist     # 0 of 10000 predictions differ
 ```
 
-After a new `npu-mnist` run, paste its `TRACE` line's JSON into `trace` in `data.js`.
+After a new `npu-mnist` run, paste its `TRACE` line's JSON into `trace` in `data.js`. After retraining, rerun `sw/mnist/lessons.py` too (it checks that it reproduces `model.bin`).
+
+Lesson scenes can be linked one at a time: `learn/#s-neuron` scrolls to a scene, `learn/?solo=s-neuron&step=4` shows only that scene at that step. Scene ids: `s-pixels`, `s-neuron`, `s-layer`, `s-relu`, `s-output`, `s-loss`, `s-descent`, `s-backprop`, `s-replay`, `s-adc`, `s-requant`, `s-cost`, `s-dsp`, `s-reuse`.
 
 Preview locally (any static server, because the page uses JavaScript modules):
 

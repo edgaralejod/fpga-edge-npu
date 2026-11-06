@@ -9,6 +9,12 @@ python3 -m venv ~/venv-npu && ~/venv-npu/bin/pip install numpy
 
 `train.py` downloads the four MNIST files from Google's CVDF mirror (`storage.googleapis.com/cvdf-datasets/mnist/`).
 
+`lessons.py` reruns the same training (same seed, so the same weights; it checks them against `model.bin`) and records what the site's lessons animate: the loss after every 5th step, test accuracy per epoch, 16 neurons' weights at 12 moments, and the float and INT8 networks' outputs side by side. It writes `site/public/learn/data/`:
+
+```sh
+~/venv-npu/bin/python sw/mnist/lessons.py          # about 15 s on 16 cores
+```
+
 ## Quantization
 
 | Quantity | Type | Scale |
