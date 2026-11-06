@@ -89,7 +89,7 @@ const pixels = {
 
 // ---------------------------------------------------------------------------
 const neuron = {
-  id: "s-neuron", kicker: "1.2", title: "One neuron is a weighted sum", w: 960, h: 540,
+  id: "s-neuron", kicker: "1.2", title: "One neuron is a weighted sum", w: 960, h: 540, video: "video/one-neuron.mp4",
   init: (D) => {
     // Start with the most structured neuron that fires on image #0 (a 7)
     const h = D.run(0).h; let j = D.training.snapshots.neurons.find((k) => h[k] > 60);
